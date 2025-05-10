@@ -9,61 +9,58 @@ const server = createServer((connection) => {
     }
 
     // Parse header fields
-    const requestApiKey = data.readInt16BE(4);
-    const requestApiVersion = data.readInt16BE(6);
     const correlationId = data.readInt32BE(8);
 
-    // Create APIVersions response
-    const apiVersions = [
-      {
-        apiKey: 18, // API_VERSIONS
-        minVersion: 0,
-        maxVersion: 4
-      }
-    ];
+    // Create APIVersions response data
+    const apiVersions = [{
+      apiKey: 18,    // API_VERSIONS
+      minVersion: 0,
+      maxVersion: 4
+    }];
 
     // Calculate sizes:
     // Header: 4 (correlation_id)
     // Body: 2 (error_code) + 4 (throttle_time_ms) + 4 (api_versions count) + 6 (per api_version)
     const bodySize = 2 + 4 + 4 + (apiVersions.length * 6);
-    const totalSize = 4 + bodySize; // 4 (message_size) + header + body
+    const totalSize = 4 + bodySize; // 4 (message_size) + bodySize
 
+    // Create buffer with exact required size
     const response = Buffer.alloc(totalSize);
     let offset = 0;
 
-    // Write message_size (4 bytes) - size of remaining message (header + body)
-    response.writeInt32BE(bodySize + 4, offset); // header (4) + body
+    // 1. Write message_size (4 bytes) - size of everything after this field
+    response.writeInt32BE(bodySize, offset); // bodySize = header + body
     offset += 4;
 
-    // Write correlation_id (4 bytes)
+    // 2. Write correlation_id (4 bytes)
     response.writeInt32BE(correlationId, offset);
     offset += 4;
 
-    // Write error_code (2 bytes) - 0 (NO_ERROR)
-    response.writeInt16BE(0, offset);
+    // 3. Write error_code (2 bytes)
+    response.writeInt16BE(0, offset); // 0 = NO_ERROR
     offset += 2;
 
-    // Write throttle_time_ms (4 bytes) - 0
-    response.writeInt32BE(0, offset);
+    // 4. Write throttle_time_ms (4 bytes)
+    response.writeInt32BE(0, offset); // 0 = no throttle
     offset += 4;
 
-    // Write api_versions array length (4 bytes)
+    // 5. Write api_versions array length (4 bytes)
     response.writeInt32BE(apiVersions.length, offset);
     offset += 4;
 
-    // Write each api_version entry (6 bytes each)
-    for (const api of apiVersions) {
+    // 6. Write each api_version entry (6 bytes each)
+    apiVersions.forEach(api => {
       response.writeInt16BE(api.apiKey, offset);
       offset += 2;
       response.writeInt16BE(api.minVersion, offset);
       offset += 2;
       response.writeInt16BE(api.maxVersion, offset);
       offset += 2;
-    }
+    });
 
     // Verify we filled exactly the buffer size
     if (offset !== totalSize) {
-      console.error(`Buffer size mismatch: wrote ${offset} bytes, expected ${totalSize}`);
+      console.error(`Buffer error: wrote ${offset} bytes but allocated ${totalSize}`);
       return;
     }
 
