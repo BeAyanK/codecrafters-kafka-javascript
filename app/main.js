@@ -8,7 +8,7 @@ const server = createServer((connection) => {
       return;
     }
 
-    // Parse correlation ID from request header (offset 8-11)
+    // Parse correlation ID from request header
     const correlationId = data.readInt32BE(8);
 
     // Define supported API versions
@@ -20,37 +20,33 @@ const server = createServer((connection) => {
       }
     ];
 
-    // Prepare response body:
-    // error_code (2) + throttle_time_ms (4) + api_versions count (4) + 6 * number of versions
-    const bodyLength = 2 + 4 + 4 + (apiVersions.length * 6);
+    // Calculate response body length:
+    // error_code (2) + array length (4) + each entry (6 * N) + throttle_time_ms (4) + TAG_SECTION (1)
+    const bodyLength = 2 + 4 + (apiVersions.length * 6) + 4 + 1;
     const headerLength = 4; // correlation_id
     const messageSize = headerLength + bodyLength;
 
-    // Allocate full buffer including 4 bytes for message size prefix
+    // Allocate full buffer (4 extra bytes for the message length prefix)
     const response = Buffer.alloc(4 + messageSize);
     let offset = 0;
 
-    // 1. Write message_size (excludes these 4 bytes)
+    // Write message_size (excludes these 4 bytes)
     response.writeInt32BE(messageSize, offset);
     offset += 4;
 
-    // 2. Write correlation_id
+    // Write correlation_id
     response.writeInt32BE(correlationId, offset);
     offset += 4;
 
-    // 3. Write error_code (2 bytes)
-    response.writeInt16BE(0, offset); // 0 = NO_ERROR
+    // Write error_code
+    response.writeInt16BE(0, offset); // NO_ERROR
     offset += 2;
 
-    // 4. Write throttle_time_ms (4 bytes)
-    response.writeInt32BE(0, offset); // No throttling
-    offset += 4;
-
-    // 5. Write number of API versions (4 bytes)
+    // Write api_versions count
     response.writeInt32BE(apiVersions.length, offset);
     offset += 4;
 
-    // 6. Write each API version (6 bytes each)
+    // Write each api_version
     apiVersions.forEach(api => {
       response.writeInt16BE(api.apiKey, offset);
       offset += 2;
@@ -60,13 +56,20 @@ const server = createServer((connection) => {
       offset += 2;
     });
 
-    // Sanity check: buffer offset should match allocated size
+    // Write throttle_time_ms
+    response.writeInt32BE(0, offset);
+    offset += 4;
+
+    // Write TAG_SECTION (empty, just a single 0 byte)
+    response.writeUInt8(0, offset);
+    offset += 1;
+
+    // Final buffer size check
     if (offset !== response.length) {
-      console.error(`Buffer error: wrote ${offset} bytes but allocated ${response.length}`);
+      console.error(`Buffer mismatch: expected ${response.length}, wrote ${offset}`);
       return;
     }
 
-    // Send response
     connection.write(response);
   });
 
