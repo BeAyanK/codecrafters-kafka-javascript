@@ -59,11 +59,11 @@ function parseApiVersionsRequest(buffer) {
   const softwareVersion = parseKafkaString(buffer, offset);
   offset = softwareVersion.offset;
 
-  // Only read tagged fields if there's still data left
+  // Optional: tagged fields
   if (offset < buffer.length) {
-    // Just skip it or log it — this is usually 0x00
+    // Don't read if not enough bytes
     const taggedFieldsLength = buffer.readUInt8(offset);
-    offset += 1 + taggedFieldsLength; // basic assumption; safe
+    offset += 1 + taggedFieldsLength; // skip (not needed in our case)
   }
 
   return {
@@ -80,13 +80,18 @@ function writeHeaderAndApiVersionsResponse(correlationId) {
     { apiKey: 18, minVersion: 0, maxVersion: 3 },
   ];
 
-  const responseBody = Buffer.alloc(4 + 2 + apiVersions.length * 6 + 1); // correlationId + numEntries + each 6 bytes + tagged fields (1 byte)
+  const apiVersionsCount = apiVersions.length;
+
+  // Calculate exact response size
+  const responseBodySize = 4 + 4 + (apiVersionsCount * 6) + 1; // correlationId + apiVersionsCount (int32) + versions + tagged fields
+
+  const responseBody = Buffer.alloc(responseBodySize);
   let offset = 0;
 
-  responseBody.writeInt32BE(correlationId, offset);
+  responseBody.writeInt32BE(correlationId, offset); // 4 bytes
   offset += 4;
 
-  responseBody.writeInt32BE(apiVersions.length, offset);
+  responseBody.writeInt32BE(apiVersionsCount, offset); // 4 bytes
   offset += 4;
 
   for (const version of apiVersions) {
@@ -98,14 +103,12 @@ function writeHeaderAndApiVersionsResponse(correlationId) {
     offset += 2;
   }
 
-  // Tagged fields (just 0x00 for now)
-  responseBody.writeUInt8(0x00, offset);
+  responseBody.writeUInt8(0x00, offset); // tagged fields
   offset += 1;
 
-  const totalLength = responseBody.length;
-  const response = Buffer.alloc(4 + totalLength);
-  response.writeInt32BE(totalLength, 0);
-  responseBody.copy(response, 4);
+  const finalResponse = Buffer.alloc(4 + responseBody.length);
+  finalResponse.writeInt32BE(responseBody.length, 0);
+  responseBody.copy(finalResponse, 4);
 
-  return response;
+  return finalResponse;
 }
