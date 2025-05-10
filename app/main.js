@@ -1,31 +1,36 @@
-import net from "net";
-
-
-// Uncomment this block to pass the first stage
-const server = net.createServer((connection) => {
-  // Handle connection
-});
-
-server.listen(9092, "127.0.0.1");
-import net from "net";
+import { createServer } from "net";
 import { Buffer } from "buffer";
 
-const server = net.createServer((connection) => {
+const server = createServer((connection) => {
   connection.on("data", (data) => {
-    // For this stage, we ignore the request data
+    // Create response buffer (4 bytes message_size + 4 bytes correlation_id)
+    const response = Buffer.alloc(8);
     
-    // Create the response buffer
-    const response = Buffer.alloc(8); // 4 bytes for message_size + 4 bytes for correlation_id
+    // Write message_size (4 bytes) - value 0 for this stage
+    response.writeInt32BE(0, 0);
     
-    // Set message_size (4 bytes) - for this stage, value doesn't matter
-    response.writeInt32BE(0, 0); // Writing 0 as a placeholder
-    
-    // Set correlation_id (4 bytes) - must be 7
-    response.writeInt32BE(7, 4); // Writing 7 at offset 4
+    // Write correlation_id (4 bytes) - must be 7
+    response.writeInt32BE(7, 4);
     
     // Send the response
     connection.write(response);
   });
+
+  connection.on("error", (err) => {
+    console.error("Connection error:", err);
+  });
 });
 
-server.listen(9092, "127.0.0.1");
+server.on("error", (err) => {
+  console.error("Server error:", err);
+});
+
+server.listen(9092, "127.0.0.1", () => {
+  console.log("Server listening on port 9092");
+});
+
+// Keep the process running
+process.on("SIGTERM", () => {
+  server.close();
+  process.exit(0);
+});
