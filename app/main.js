@@ -1,105 +1,111 @@
 import net from "net";
-import fs from "fs";
 
-const server = net.createServer();
 const PORT = 9092;
 
-function writeHeaderAndApiVersionsResponse(socket, correlationId) {
-  const RESPONSE_HEADER_SIZE = 4 + 4; // response size + correlation id
-  const ERROR_CODE = 0;
-  const NUM_API_KEYS = 0;
-  const THROTTLE_TIME_MS = 0;
-  const TAG_BUFFER = 0; // empty tag buffer (UNSIGNED_VARINT = 0)
+const server = net.createServer((socket) => {
+  console.log("Server listening on port", PORT);
 
-  // total message length after response size
-  const responseBodyLength = 2 + 4 + 4 + 1; // errorCode + numApiKeys + throttleTime + tagBuffer
-  const totalLength = 4 + responseBodyLength; // correlationId + responseBody
-
-  const buffer = Buffer.alloc(4 + totalLength); // 4 bytes for totalLength prefix
-  let offset = 0;
-
-  buffer.writeInt32BE(totalLength, offset); // total length (excluding this int)
-  offset += 4;
-
-  buffer.writeInt32BE(correlationId, offset); // correlation id
-  offset += 4;
-
-  buffer.writeInt16BE(ERROR_CODE, offset); // error code
-  offset += 2;
-
-  buffer.writeInt32BE(NUM_API_KEYS, offset); // number of api keys
-  offset += 4;
-
-  buffer.writeInt32BE(THROTTLE_TIME_MS, offset); // throttle time
-  offset += 4;
-
-  buffer.writeUInt8(TAG_BUFFER, offset); // tag buffer (unsigned varint 0)
-  offset += 1;
-
-  socket.write(buffer);
-}
-
-function parseKafkaString(buffer, offset) {
-    const length = buffer.readInt16BE(offset);
-    offset += 2;
-    const value = buffer.slice(offset, offset + length).toString("utf-8");
-    offset += length;
-    return { value, offset };
-  }
-  
-  function parseApiVersionsRequest(buffer) {
-    let offset = 0;
-  
-    const totalLength = buffer.readInt32BE(offset);
-    offset += 4;
-  
-    const apiKey = buffer.readInt16BE(offset);
-    offset += 2;
-  
-    const apiVersion = buffer.readInt16BE(offset);
-    offset += 2;
-  
-    const correlationId = buffer.readInt32BE(offset);
-    offset += 4;
-  
-    const clientIdResult = parseKafkaString(buffer, offset);
-    offset = clientIdResult.offset;
-  
-    const softwareNameResult = parseKafkaString(buffer, offset);
-    offset = softwareNameResult.offset;
-  
-    const softwareVersionResult = parseKafkaString(buffer, offset);
-    offset = softwareVersionResult.offset;
-  
-    // Tagged fields: UNSIGNED_VARINT — but most likely just 0 (1 byte)
-    // Read 1 byte only if available
-    const taggedField = buffer.readUInt8(offset); // <- safely read if buffer is long enough
-    offset += 1;
-  
-    return {
-      apiKey,
-      apiVersion,
-      correlationId,
-    };
-  }
-  
-
-server.on("connection", (socket) => {
   socket.on("data", (data) => {
     try {
       const { apiKey, apiVersion, correlationId } = parseApiVersionsRequest(data);
 
-      if (apiKey === 18 && (apiVersion === 3 || apiVersion === 4)) {
-        writeHeaderAndApiVersionsResponse(socket, correlationId);
+      if (apiKey === 18) {
+        const response = writeHeaderAndApiVersionsResponse(correlationId);
+        socket.write(response);
       } else {
-        console.log(`Unsupported API Key: ${apiKey} or version: ${apiVersion}`);
+        console.log("Unknown apiKey:", apiKey);
       }
     } catch (err) {
       console.error("Error handling data:", err);
     }
   });
+
+  socket.on("error", (err) => {
+    console.error("Socket error:", err);
+  });
 });
 
-server.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
-});
+server.listen(PORT);
+
+function parseKafkaString(buffer, offset) {
+  const length = buffer.readInt16BE(offset);
+  offset += 2;
+  const value = buffer.slice(offset, offset + length).toString("utf-8");
+  offset += length;
+  return { value, offset };
+}
+
+function parseApiVersionsRequest(buffer) {
+  let offset = 0;
+
+  const totalLength = buffer.readInt32BE(offset);
+  offset += 4;
+
+  const apiKey = buffer.readInt16BE(offset);
+  offset += 2;
+
+  const apiVersion = buffer.readInt16BE(offset);
+  offset += 2;
+
+  const correlationId = buffer.readInt32BE(offset);
+  offset += 4;
+
+  const clientId = parseKafkaString(buffer, offset);
+  offset = clientId.offset;
+
+  const softwareName = parseKafkaString(buffer, offset);
+  offset = softwareName.offset;
+
+  const softwareVersion = parseKafkaString(buffer, offset);
+  offset = softwareVersion.offset;
+
+  // Only read tagged fields if there's still data left
+  if (offset < buffer.length) {
+    // Just skip it or log it — this is usually 0x00
+    const taggedFieldsLength = buffer.readUInt8(offset);
+    offset += 1 + taggedFieldsLength; // basic assumption; safe
+  }
+
+  return {
+    apiKey,
+    apiVersion,
+    correlationId,
+  };
+}
+
+function writeHeaderAndApiVersionsResponse(correlationId) {
+  const apiVersions = [
+    { apiKey: 0, minVersion: 0, maxVersion: 3 },
+    { apiKey: 1, minVersion: 0, maxVersion: 7 },
+    { apiKey: 18, minVersion: 0, maxVersion: 3 },
+  ];
+
+  const responseBody = Buffer.alloc(4 + 2 + apiVersions.length * 6 + 1); // correlationId + numEntries + each 6 bytes + tagged fields (1 byte)
+  let offset = 0;
+
+  responseBody.writeInt32BE(correlationId, offset);
+  offset += 4;
+
+  responseBody.writeInt32BE(apiVersions.length, offset);
+  offset += 4;
+
+  for (const version of apiVersions) {
+    responseBody.writeInt16BE(version.apiKey, offset);
+    offset += 2;
+    responseBody.writeInt16BE(version.minVersion, offset);
+    offset += 2;
+    responseBody.writeInt16BE(version.maxVersion, offset);
+    offset += 2;
+  }
+
+  // Tagged fields (just 0x00 for now)
+  responseBody.writeUInt8(0x00, offset);
+  offset += 1;
+
+  const totalLength = responseBody.length;
+  const response = Buffer.alloc(4 + totalLength);
+  response.writeInt32BE(totalLength, 0);
+  responseBody.copy(response, 4);
+
+  return response;
+}
