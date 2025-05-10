@@ -1,5 +1,5 @@
 // Importing necessary functions
-import { parseApiVersionsRequest, writeHeaderAndApiVersionsResponse } from './parser'; // Assuming these are in parser.js
+import { parseApiVersionsRequest, writeHeaderAndApiVersionsResponse } from './parser.js'; // Assuming these are in parser.js
 import net from 'net';
 
 // Handle the socket connection and data parsing
