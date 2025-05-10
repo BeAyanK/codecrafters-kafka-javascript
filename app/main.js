@@ -26,13 +26,13 @@ const server = createServer((connection) => {
     // Header: 4 (message_size) + 4 (correlation_id)
     // Body: 2 (error_code) + 4 (throttle_time_ms) + 4 (api_versions array length) + 6 per api_version
     const bodySize = 2 + 4 + 4 + (apiVersions.length * 6);
-    const totalSize = 4 + bodySize; // Header (4) + body
+    const responseSize = 4 + bodySize; // Total response size
 
-    const response = Buffer.alloc(4 + bodySize);
+    const response = Buffer.alloc(responseSize);
     let offset = 0;
 
-    // Write message_size (4 bytes)
-    response.writeInt32BE(bodySize, offset);
+    // Write message_size (4 bytes) - size of remaining message (header + body)
+    response.writeInt32BE(4 + bodySize, offset); // 4 for header + bodySize
     offset += 4;
 
     // Write correlation_id (4 bytes)
@@ -51,7 +51,7 @@ const server = createServer((connection) => {
     response.writeInt32BE(apiVersions.length, offset);
     offset += 4;
 
-    // Write each api_version entry
+    // Write each api_version entry (6 bytes each)
     for (const api of apiVersions) {
       response.writeInt16BE(api.apiKey, offset);
       offset += 2;
@@ -59,6 +59,12 @@ const server = createServer((connection) => {
       offset += 2;
       response.writeInt16BE(api.maxVersion, offset);
       offset += 2;
+    }
+
+    // Verify we filled exactly the buffer size
+    if (offset !== responseSize) {
+      console.error(`Buffer size mismatch: wrote ${offset} bytes, expected ${responseSize}`);
+      return;
     }
 
     connection.write(response);
