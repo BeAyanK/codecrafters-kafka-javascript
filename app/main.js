@@ -3,14 +3,27 @@ import { Buffer } from "buffer";
 
 const server = createServer((connection) => {
   connection.on("data", (data) => {
+    // Minimum request size check (4 bytes message_size + 8 bytes header)
+    if (data.length < 12) {
+      console.error("Request too small");
+      return;
+    }
+
+    // Parse correlation_id from request
+    // message_size: 4 bytes (we don't need it here)
+    // request_api_key: 2 bytes (offset 4)
+    // request_api_version: 2 bytes (offset 6)
+    // correlation_id: 4 bytes (offset 8)
+    const correlationId = data.readInt32BE(8);
+
     // Create response buffer (4 bytes message_size + 4 bytes correlation_id)
     const response = Buffer.alloc(8);
     
     // Write message_size (4 bytes) - value 0 for this stage
     response.writeInt32BE(0, 0);
     
-    // Write correlation_id (4 bytes) - must be 7
-    response.writeInt32BE(7, 4);
+    // Write correlation_id (4 bytes) - from the request
+    response.writeInt32BE(correlationId, 4);
     
     // Send the response
     connection.write(response);
