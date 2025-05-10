@@ -39,42 +39,50 @@ function writeHeaderAndApiVersionsResponse(socket, correlationId) {
   socket.write(buffer);
 }
 
-function parseApiVersionsRequest(buffer) {
-  let offset = 0;
-
-  const totalLength = buffer.readInt32BE(offset);
-  offset += 4;
-
-  const apiKey = buffer.readInt16BE(offset);
-  offset += 2;
-
-  const apiVersion = buffer.readInt16BE(offset);
-  offset += 2;
-
-  const correlationId = buffer.readInt32BE(offset);
-  offset += 4;
-
-  // clientId is next, which is a Kafka string: 2-byte length prefix
-  const clientIdLength = buffer.readInt16BE(offset);
-  offset += 2 + clientIdLength;
-
-  // clientSoftwareName and clientSoftwareVersion are both Kafka strings
-  const nameLength = buffer.readInt16BE(offset);
-  offset += 2 + nameLength;
-
-  const versionLength = buffer.readInt16BE(offset);
-  offset += 2 + versionLength;
-
-  // apiVersion 3 and 4 contain a tagged fields section — skip it
-  const taggedField = buffer.readUInt8(offset);
-  offset += 1;
-
-  return {
-    apiKey,
-    apiVersion,
-    correlationId,
-  };
-}
+function parseKafkaString(buffer, offset) {
+    const length = buffer.readInt16BE(offset);
+    offset += 2;
+    const value = buffer.slice(offset, offset + length).toString("utf-8");
+    offset += length;
+    return { value, offset };
+  }
+  
+  function parseApiVersionsRequest(buffer) {
+    let offset = 0;
+  
+    const totalLength = buffer.readInt32BE(offset);
+    offset += 4;
+  
+    const apiKey = buffer.readInt16BE(offset);
+    offset += 2;
+  
+    const apiVersion = buffer.readInt16BE(offset);
+    offset += 2;
+  
+    const correlationId = buffer.readInt32BE(offset);
+    offset += 4;
+  
+    const clientIdResult = parseKafkaString(buffer, offset);
+    offset = clientIdResult.offset;
+  
+    const softwareNameResult = parseKafkaString(buffer, offset);
+    offset = softwareNameResult.offset;
+  
+    const softwareVersionResult = parseKafkaString(buffer, offset);
+    offset = softwareVersionResult.offset;
+  
+    // Tagged fields: UNSIGNED_VARINT — but most likely just 0 (1 byte)
+    // Read 1 byte only if available
+    const taggedField = buffer.readUInt8(offset); // <- safely read if buffer is long enough
+    offset += 1;
+  
+    return {
+      apiKey,
+      apiVersion,
+      correlationId,
+    };
+  }
+  
 
 server.on("connection", (socket) => {
   socket.on("data", (data) => {
