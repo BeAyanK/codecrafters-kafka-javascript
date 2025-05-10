@@ -1,16 +1,14 @@
-import net from "net";
-
-const PORT = 9092;
+const net = require("net");
+const { parseApiVersionsRequest } = require("./parser"); // assuming you have this
+const { writeHeaderAndApiVersionsResponse } = require("./response"); // the function we just fixed
 
 const server = net.createServer((socket) => {
-  console.log("Server listening on port", PORT);
-
   socket.on("data", (data) => {
     try {
       const { apiKey, apiVersion, correlationId } = parseApiVersionsRequest(data);
 
-      if (apiKey === 18) {
-        const response = writeHeaderAndApiVersionsResponse(correlationId);
+      if (apiKey === 18) { // ApiVersions request
+        const response = writeHeaderAndApiVersionsResponse(correlationId, apiVersion);
         socket.write(response);
       } else {
         console.log("Unknown apiKey:", apiKey);
@@ -19,13 +17,12 @@ const server = net.createServer((socket) => {
       console.error("Error handling data:", err);
     }
   });
-
-  socket.on("error", (err) => {
-    console.error("Socket error:", err);
-  });
 });
 
-server.listen(PORT);
+server.listen(9092, () => {
+  console.log("Server listening on port 9092");
+});
+
 
 function parseKafkaString(buffer, offset) {
   const length = buffer.readInt16BE(offset);
@@ -73,7 +70,7 @@ function parseApiVersionsRequest(buffer) {
   };
 }
 
-function writeHeaderAndApiVersionsResponse(correlationId) {
+function writeHeaderAndApiVersionsResponse(correlationId, requestApiVersion) {
   const apiVersions = [
     { apiKey: 0, minVersion: 0, maxVersion: 3 },
     { apiKey: 1, minVersion: 0, maxVersion: 7 },
@@ -82,16 +79,26 @@ function writeHeaderAndApiVersionsResponse(correlationId) {
 
   const apiVersionsCount = apiVersions.length;
 
-  // Calculate exact response size
-  const responseBodySize = 4 + 4 + (apiVersionsCount * 6) + 1; // correlationId + apiVersionsCount (int32) + versions + tagged fields
+  const errorCode = 0;
+  const taggedFieldsSize = 1; // single byte, always 0
+
+  // Response body size:
+  // correlationId (4) + errorCode (2) + apiVersions (6 * count) + taggedFields (1)
+  const responseBodySize = 4 + 2 + (6 * apiVersionsCount) + taggedFieldsSize;
 
   const responseBody = Buffer.alloc(responseBodySize);
   let offset = 0;
 
-  responseBody.writeInt32BE(correlationId, offset); // 4 bytes
+  // ResponseHeader: correlationId
+  responseBody.writeInt32BE(correlationId, offset);
   offset += 4;
 
-  responseBody.writeInt32BE(apiVersionsCount, offset); // 4 bytes
+  // error_code
+  responseBody.writeInt16BE(errorCode, offset);
+  offset += 2;
+
+  // num_api_keys
+  responseBody.writeInt32BE(apiVersionsCount, offset);
   offset += 4;
 
   for (const version of apiVersions) {
@@ -103,12 +110,14 @@ function writeHeaderAndApiVersionsResponse(correlationId) {
     offset += 2;
   }
 
-  responseBody.writeUInt8(0x00, offset); // tagged fields
+  // Tagged fields
+  responseBody.writeUInt8(0x00, offset);
   offset += 1;
 
   const finalResponse = Buffer.alloc(4 + responseBody.length);
-  finalResponse.writeInt32BE(responseBody.length, 0);
+  finalResponse.writeInt32BE(responseBody.length, 0); // message size prefix
   responseBody.copy(finalResponse, 4);
 
   return finalResponse;
 }
+
