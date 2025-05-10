@@ -9,21 +9,37 @@ const server = createServer((connection) => {
       return;
     }
 
-    // Parse correlation_id from request
-    // message_size: 4 bytes (we don't need it here)
-    // request_api_key: 2 bytes (offset 4)
-    // request_api_version: 2 bytes (offset 6)
-    // correlation_id: 4 bytes (offset 8)
+    // Parse header fields
+    const requestApiKey = data.readInt16BE(4);
+    const requestApiVersion = data.readInt16BE(6);
     const correlationId = data.readInt32BE(8);
 
-    // Create response buffer (4 bytes message_size + 4 bytes correlation_id)
-    const response = Buffer.alloc(8);
+    // Create response buffer
+    let response;
     
-    // Write message_size (4 bytes) - value 0 for this stage
-    response.writeInt32BE(0, 0);
-    
-    // Write correlation_id (4 bytes) - from the request
-    response.writeInt32BE(correlationId, 4);
+    // Check if ApiVersions version is supported (0-4)
+    if (requestApiVersion < 0 || requestApiVersion > 4) {
+      // Create error response (4 bytes message_size + 4 bytes correlation_id + 2 bytes error_code)
+      response = Buffer.alloc(10);
+      
+      // Write message_size (4 bytes) - value 0 for this stage
+      response.writeInt32BE(0, 0);
+      
+      // Write correlation_id (4 bytes)
+      response.writeInt32BE(correlationId, 4);
+      
+      // Write error_code (2 bytes) - 35 (UNSUPPORTED_VERSION)
+      response.writeInt16BE(35, 8);
+    } else {
+      // Create basic response (4 bytes message_size + 4 bytes correlation_id)
+      response = Buffer.alloc(8);
+      
+      // Write message_size (4 bytes) - value 0 for this stage
+      response.writeInt32BE(0, 0);
+      
+      // Write correlation_id (4 bytes)
+      response.writeInt32BE(correlationId, 4);
+    }
     
     // Send the response
     connection.write(response);
