@@ -1,6 +1,9 @@
 const net = require("net");
-const { parseApiVersionsRequest } = require("./parser"); // assuming you have this
-const { writeHeaderAndApiVersionsResponse } = require("./response"); // the function we just fixed
+// Assuming parseApiVersionsRequest is in a separate file 'parser.js'
+import { parseApiVersionsRequest } from './parser'; // Correct import
+
+// No need to redeclare the function here in this file
+const { apiKey, apiVersion, correlationId } = parseApiVersionsRequest(data);
 
 const server = net.createServer((socket) => {
   socket.on("data", (data) => {
