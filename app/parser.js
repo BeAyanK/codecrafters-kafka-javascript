@@ -1,98 +1,47 @@
+// parser.js
 
-function parseKafkaString(buffer, offset) {
-  const length = buffer.readInt16BE(offset);
-  offset += 2;
-  const value = buffer.slice(offset, offset + length).toString("utf-8");
-  offset += length;
-  return { value, offset };
+export function parseApiVersionsRequest(data) {
+  // Parse the request header (assuming v4 format)
+  // First 4 bytes: message length (we can ignore for request parsing)
+  // Next 4 bytes: API key (int16)
+  const apiKey = data.readInt16BE(4);
+  // Next 2 bytes: API version (int16)
+  const apiVersion = data.readInt16BE(6);
+  // Next 4 bytes: correlation ID (int32)
+  const correlationId = data.readInt32BE(8);
+  
+  return { apiKey, apiVersion, correlationId };
 }
 
-function parseApiVersionsRequest(buffer) {
-  let offset = 0;
-
-  const totalLength = buffer.readInt32BE(offset);
-  offset += 4;
-
-  const apiKey = buffer.readInt16BE(offset);
-  offset += 2;
-
-  const apiVersion = buffer.readInt16BE(offset);
-  offset += 2;
-
-  const correlationId = buffer.readInt32BE(offset);
-  offset += 4;
-
-  const clientId = parseKafkaString(buffer, offset);
-  offset = clientId.offset;
-
-  const softwareName = parseKafkaString(buffer, offset);
-  offset = softwareName.offset;
-
-  const softwareVersion = parseKafkaString(buffer, offset);
-  offset = softwareVersion.offset;
-
-  // Optional: tagged fields
-  if (offset < buffer.length) {
-    // Don't read if not enough bytes
-    const taggedFieldsLength = buffer.readUInt8(offset);
-    offset += 1 + taggedFieldsLength; // skip (not needed in our case)
-  }
-
-  return {
-    apiKey,
-    apiVersion,
-    correlationId,
-  };
-}
-
-function writeHeaderAndApiVersionsResponse(correlationId, requestApiVersion) {
-  const apiVersions = [
-    { apiKey: 0, minVersion: 0, maxVersion: 3 },
-    { apiKey: 1, minVersion: 0, maxVersion: 7 },
-    { apiKey: 18, minVersion: 0, maxVersion: 3 },
-  ];
-
-  const apiVersionsCount = apiVersions.length;
-
-  const errorCode = 0;
-  const taggedFieldsSize = 1; // single byte, always 0
-
-  // Response body size:
-  // correlationId (4) + errorCode (2) + apiVersions (6 * count) + taggedFields (1)
-  const responseBodySize = 4 + 2 + (6 * apiVersionsCount) + taggedFieldsSize;
-
-  const responseBody = Buffer.alloc(responseBodySize);
-  let offset = 0;
-
-  // ResponseHeader: correlationId
-  responseBody.writeInt32BE(correlationId, offset);
-  offset += 4;
-
-  // error_code
-  responseBody.writeInt16BE(errorCode, offset);
-  offset += 2;
-
-  // num_api_keys
-  responseBody.writeInt32BE(apiVersionsCount, offset);
-  offset += 4;
-
+export function writeHeaderAndApiVersionsResponse(correlationId, apiVersion, apiVersions) {
+  // Calculate message length:
+  // Header: 4 (length) + 4 (correlationId) + 4 (error code + array length)
+  // Body: For each apiVersion entry: 2 (apiKey) + 2 (min) + 2 (max) = 6 bytes
+  const messageLength = 4 + 4 + (apiVersions.length * 6);
+  
+  // Create a buffer with enough space
+  const buffer = Buffer.alloc(4 + messageLength); // +4 for the length itself
+  
+  // Write message length (4 bytes)
+  buffer.writeInt32BE(messageLength, 0);
+  
+  // Write correlation ID (4 bytes)
+  buffer.writeInt32BE(correlationId, 4);
+  
+  // Write error code (int16) - 0 for no error
+  buffer.writeInt16BE(0, 8);
+  
+  // Write API versions array length (int16)
+  buffer.writeInt16BE(apiVersions.length, 10);
+  
+  // Write each API version entry
+  let offset = 12;
   for (const version of apiVersions) {
-    responseBody.writeInt16BE(version.apiKey, offset);
-    offset += 2;
-    responseBody.writeInt16BE(version.minVersion, offset);
-    offset += 2;
-    responseBody.writeInt16BE(version.maxVersion, offset);
-    offset += 2;
+    buffer.writeInt16BE(version.apiKey, offset);
+    buffer.writeInt16BE(version.minVersion, offset + 2);
+    buffer.writeInt16BE(version.maxVersion, offset + 4);
+    offset += 6;
   }
-
-  // Tagged fields
-  responseBody.writeUInt8(0x00, offset);
-  offset += 1;
-
-  const finalResponse = Buffer.alloc(4 + responseBody.length);
-  finalResponse.writeInt32BE(responseBody.length, 0); // message size prefix
-  responseBody.copy(finalResponse, 4);
-
-  return finalResponse;
+  
+  return buffer;
 }
-
