@@ -1,37 +1,21 @@
-// Importing necessary functions
+// main.js
 import { parseApiVersionsRequest, writeHeaderAndApiVersionsResponse } from './parser.js';
 import net from 'net';
 
-// Handle the socket connection and data parsing
 const server = net.createServer((socket) => {
   socket.on('data', (data) => {
     try {
       const { apiKey, apiVersion, correlationId } = parseApiVersionsRequest(data);
 
       if (apiKey === 18) {  // Check for ApiVersions request
-        // Create API versions array with at least API key 18 and min version >= 4
-        const apiVersions = [
-          {
-            apiKey: 18,  // API_VERSIONS
-            minVersion: 0,
-            maxVersion: 4  // At least 4 as required
-          }
-          // Can add more API keys if needed
-        ];
-        
-        const response = writeHeaderAndApiVersionsResponse(
-          correlationId, 
-          apiVersion,
-          apiVersions
-        );
-        socket.write(response);  // Send the response back to the client
+        const response = writeHeaderAndApiVersionsResponse(correlationId, apiVersion);
+        socket.write(response);
       } else {
-        // Handle other API key cases if necessary
         console.log(`Unhandled API Key: ${apiKey}`);
       }
     } catch (error) {
       console.error('Error handling data:', error);
-      socket.destroy();  // Close the socket on error
+      socket.destroy();
     }
   });
 
@@ -40,7 +24,6 @@ const server = net.createServer((socket) => {
   });
 });
 
-// Start the server
 server.listen(9092, () => {
   console.log('Server listening on port 9092');
 });
