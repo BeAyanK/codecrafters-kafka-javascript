@@ -1,14 +1,18 @@
 import net from "net";
 
-// You can use print statements as follows for debugging, they'll be visible when running tests.
 console.log("Logs from your program will appear here!");
 
 // Constants
 const API_VERSIONS_KEY = 18;  // ApiVersions API key
+const DESCRIBE_TOPIC_PARTITIONS_KEY = 75;  // DescribeTopicPartitions API key
 const UNSUPPORTED_VERSION = 35;  // Error code for unsupported version
 const SUCCESS = 0;  // Success code
-const MAX_SUPPORTED_VERSION = 4;  // Maximum supported version for ApiVersions
-const MIN_SUPPORTED_VERSION = 0;  // Minimum supported version for ApiVersions
+
+// Version ranges
+const API_VERSIONS_MIN = 0;
+const API_VERSIONS_MAX = 4;
+const DESCRIBE_TOPIC_PARTITIONS_MIN = 0;
+const DESCRIBE_TOPIC_PARTITIONS_MAX = 0;
 
 const server = net.createServer((connection) => {
   connection.on('data', (data) => {
@@ -25,12 +29,12 @@ const server = net.createServer((connection) => {
       // Handle ApiVersions request
       console.log("Processing ApiVersions request");
       
-      // Create a fixed response for ApiVersions
-      response = Buffer.alloc(23);
+      // Create response with both API entries
+      response = Buffer.alloc(31); // Total response size
       let offset = 0;
       
-      // Message size (4 bytes) - 19 bytes for the rest of the message
-      response.writeInt32BE(19, offset);
+      // Message size (4 bytes) - 27 bytes for the rest of the message
+      response.writeInt32BE(27, offset);
       offset += 4;
       
       // Correlation ID (4 bytes) - from the request
@@ -38,31 +42,38 @@ const server = net.createServer((connection) => {
       offset += 4;
       
       // Check if API version is supported
-      if (apiVersion < MIN_SUPPORTED_VERSION || apiVersion > MAX_SUPPORTED_VERSION) {
-        // Unsupported version - respond with error code
+      if (apiVersion < API_VERSIONS_MIN || apiVersion > API_VERSIONS_MAX) {
         console.log(`Unsupported version ${apiVersion}, responding with error code ${UNSUPPORTED_VERSION}`);
         response.writeInt16BE(UNSUPPORTED_VERSION, offset);
       } else {
-        // Supported version - respond with success
         console.log(`Supported version ${apiVersion}, responding with success`);
         response.writeInt16BE(SUCCESS, offset);
       }
       offset += 2;
       
-      // API keys array length (1 byte) - 2 in COMPACT_ARRAY format (N+1)
-      response.writeUInt8(2, offset);
+      // API keys array length (1 byte) - 3 in COMPACT_ARRAY format (N+1)
+      // We have 2 APIs (18 and 75), so N+1 = 3
+      response.writeUInt8(3, offset);
       offset += 1;
       
-      // API key entry (6 bytes)
-      response.writeInt16BE(API_VERSIONS_KEY, offset);  // API key (18 = API_VERSIONS)
+      // First API key entry (18 - ApiVersions)
+      response.writeInt16BE(API_VERSIONS_KEY, offset);
       offset += 2;
-      response.writeInt16BE(MIN_SUPPORTED_VERSION, offset);   // Min version (0)
+      response.writeInt16BE(API_VERSIONS_MIN, offset);
       offset += 2;
-      response.writeInt16BE(MAX_SUPPORTED_VERSION, offset);   // Max version (4)
+      response.writeInt16BE(API_VERSIONS_MAX, offset);
       offset += 2;
+      response.writeUInt8(0, offset); // No tagged fields
+      offset += 1;
       
-      // API key entry tag buffer (1 byte) - 0 = no tagged fields
-      response.writeUInt8(0, offset);
+      // Second API key entry (75 - DescribeTopicPartitions)
+      response.writeInt16BE(DESCRIBE_TOPIC_PARTITIONS_KEY, offset);
+      offset += 2;
+      response.writeInt16BE(DESCRIBE_TOPIC_PARTITIONS_MIN, offset);
+      offset += 2;
+      response.writeInt16BE(DESCRIBE_TOPIC_PARTITIONS_MAX, offset);
+      offset += 2;
+      response.writeUInt8(0, offset); // No tagged fields
       offset += 1;
       
       // Throttle time (4 bytes) - 0
