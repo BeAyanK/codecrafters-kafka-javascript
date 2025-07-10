@@ -34,9 +34,14 @@ export function parseApiVersionsRequest(buffer) {
 
   // Optional: tagged fields
   if (offset < buffer.length) {
-    // Don't read if not enough bytes
-    const taggedFieldsLength = buffer.readUInt8(offset);
-    offset += 1 + taggedFieldsLength; // skip (not needed in our case)
+    const numTaggedFields = buffer.readUInt8(offset);
+    offset += 1;
+    for (let i = 0; i < numTaggedFields; i++) {
+      const tag = buffer.readUInt8(offset);
+      offset += 1;
+      const fieldLength = buffer.readUInt8(offset);
+      offset += 1 + fieldLength;
+    }
   }
 
   return {
@@ -55,10 +60,10 @@ export function writeHeaderAndApiVersionsResponse(correlationId, requestApiVersi
   // Calculate response size:
   // Header: correlationId (4) + errorCode (2)
   // Body: apiVersionsCount (4) + apiVersions entries (6 each) + throttleTimeMs (4) + taggedFields (1)
-  const responseSize = 4 + 2 + 4 + (apiVersions.length * 6) + 4 + 1;
+  const responseBodySize = 4 + 2 + 4 + (apiVersions.length * 6) + 4 + 1;
 
   // Create response buffer
-  const response = Buffer.alloc(responseSize);
+  const response = Buffer.alloc(responseBodySize);
   let offset = 0;
 
   // Write correlation ID (4 bytes)
@@ -85,7 +90,7 @@ export function writeHeaderAndApiVersionsResponse(correlationId, requestApiVersi
   response.writeInt32BE(0, offset);
   offset += 4;
 
-  // Write tagged fields (1 byte) - empty
+  // Write tagged fields (1 byte) - 0 for no tagged fields
   response.writeUInt8(0, offset);
   offset += 1;
 
