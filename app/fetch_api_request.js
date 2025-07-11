@@ -8,7 +8,6 @@ function readVarInt(buffer, offset) {
   let byte;
   do {
     if (offset >= buffer.length) {
-      // This error indicates malformed input buffer, should not happen in valid Kafka protocol
       throw new Error("Buffer out of bounds when reading VarInt");
     }
     byte = buffer.readUInt8(offset++);
@@ -38,7 +37,6 @@ function writeCompactBytes(data) {
 }
 
 // Global map to store topicId (hex string) to topicName mapping
-// This will be initialized once.
 let topicIdToNameMap = new Map();
 
 // Flag to ensure metadata loading happens only once
@@ -46,34 +44,37 @@ let metadataLoaded = false;
 
 // Function to load topic metadata from partition.metadata files
 function loadTopicMetadata(logDir) {
+  // Only attempt to load if not already loaded
+  if (metadataLoaded) {
+    return;
+  }
+
   try {
-    // Attempt to list directories inside logDir
     const entries = fs.readdirSync(logDir, { withFileTypes: true });
 
     for (const entry of entries) {
-      // Check if it's a directory and looks like a topic-partition folder
-      // Example: "foo-0", "paz-1". Exclude internal Kafka dirs like "__cluster_metadata-0".
-      const isTopicPartitionDir = entry.isDirectory() && 
-                                  !entry.name.startsWith('__') && 
-                                  /^[a-zA-Z0-9_-]+-\d+$/.test(entry.name); // More specific regex: topic-name-partition-id
-
-      if (isTopicPartitionDir) {
+      // Filter for directories that likely contain topic-partition data
+      // We are looking for directories like "foo-0", "paz-1", etc.
+      // Exclude special Kafka internal directories that start with "__"
+      if (entry.isDirectory() && !entry.name.startsWith('__')) {
         const partitionMetadataPath = path.join(logDir, entry.name, "partition.metadata");
         
         if (fs.existsSync(partitionMetadataPath)) {
           const content = fs.readFileSync(partitionMetadataPath, 'utf8');
-          let currentTopicId = null; // Use different variable names to avoid confusion
+          let currentTopicId = null;
           let currentTopicName = null;
 
-          content.split('\n').forEach(line => {
-            if (line.startsWith("topic.id=")) {
-              const uuidString = line.substring("topic.id=".length);
-              const rawUuidHex = uuidString.replace(/-/g, '');
+          // Parse content line by line
+          content.split(/\r?\n/).forEach(line => { // Use regex for robust newline splitting
+            const trimmedLine = line.trim(); // Trim whitespace from lines
+            if (trimmedLine.startsWith("topic.id=")) {
+              const uuidString = trimmedLine.substring("topic.id=".length);
+              const rawUuidHex = uuidString.replace(/-/g, '').toLowerCase(); // Ensure lowercase for consistent hex string comparison
               if (rawUuidHex.length === 32) {
-                  currentTopicId = rawUuidHex; // Store as hex string for map key
+                  currentTopicId = rawUuidHex;
               }
-            } else if (line.startsWith("topic.name=")) {
-              currentTopicName = line.substring("topic.name=".length);
+            } else if (trimmedLine.startsWith("topic.name=")) {
+              currentTopicName = trimmedLine.substring("topic.name=".length);
             }
           });
 
@@ -84,24 +85,28 @@ function loadTopicMetadata(logDir) {
       }
     }
     
-    // Log the outcome - CodeCrafters should pick this up
+    // Set flag that metadata has been loaded (even if empty)
+    metadataLoaded = true; 
+
+    // Log the outcome for debugging on CodeCrafters platform
     if (topicIdToNameMap.size > 0) {
+      // Use console.error as it might be more visible in CodeCrafters logs
       console.error(`[your_program] Loaded topic metadata: ${JSON.stringify(Array.from(topicIdToNameMap.entries()))}`);
     } else {
-      console.error(`[your_program] No topic metadata loaded from ${logDir}. This might be an issue.`);
+      console.error(`[your_program] WARNING: No topic metadata loaded from ${logDir}.`);
     }
   } catch (error) {
-    console.error(`[your_program] Error loading topic metadata from ${logDir}: ${error.message}`);
+    console.error(`[your_program] ERROR: Failed to load topic metadata from ${logDir}: ${error.message}`);
+    // Ensure metadataLoaded is true even on error to prevent repeated attempts
+    metadataLoaded = true; 
   }
 }
 
 
 export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
-    // Load metadata only once
+    // Ensure metadata is loaded exactly once
     if (!metadataLoaded) {
-        // The /tmp/kraft-combined-logs path is provided by the CodeCrafters tester
         loadTopicMetadata("/tmp/kraft-combined-logs");
-        metadataLoaded = true;
     }
 
     // Constants for response fields
@@ -145,13 +150,13 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
         offset += 16; // Advance past topic_id (UUID)
         offset += 1; // Skip tag buffer for topic in request (COMPACT_ARRAY of TaggedFields)
 
-        // Lookup topic name using the pre-loaded map
-        const topicName = topicIdToNameMap.get(topicIdBuffer.toString('hex'));
+        // Lookup topic name using the pre-loaded map. Convert UUID buffer to lowercase hex string.
+        const topicIdHex = topicIdBuffer.toString('hex').toLowerCase();
+        const topicName = topicIdToNameMap.get(topicIdHex);
         
         if (!topicName) {
-            // If topic name is not found, log a warning and skip this topic in the response.
-            // CodeCrafters logs will capture this if it happens.
-            console.error(`[your_program] WARN: Could not find topic name for ID: ${topicIdBuffer.toString('hex')}. Skipping this topic.`);
+            // Log a warning and skip this topic if its name can't be found
+            console.error(`[your_program] WARN: Could not find topic name for ID: ${topicIdHex}. Skipping this topic.`);
             continue; 
         }
 
