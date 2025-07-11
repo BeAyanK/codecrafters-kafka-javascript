@@ -68,7 +68,7 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
   }
   let fetchRequestResponse = {
     correlationId: responseMessage.correlationId,
-    responseHeaderTagbuffer: tagBuffer,
+    responseHeaderTagBuffer: tagBuffer,
     throttleTime,
     errorCode,
     sessionId,
@@ -76,13 +76,13 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
     tagBuffer,
   };
   const messageSizeBuffer = Buffer.alloc(4);
-  messageSizeBuffer.writeInt32BE([
-    Buffer.concat(Object.values(fetchRequestResponse)).length,
-  ]);
-  fetchRequestResponse = {
-    messageSize: messageSizeBuffer,
-    ...fetchRequestResponse,
-  };
+const messageSize = Buffer.concat(Object.values(fetchRequestResponse)).length;
+messageSizeBuffer.writeInt32BE(messageSize);  // Fix: Use the actual calculated size
+
+fetchRequestResponse = {
+  messageSize: messageSizeBuffer,
+  ...fetchRequestResponse,
+};
   sendResponseMessage(connection, fetchRequestResponse);
 };
 function readFromFileBuffer(topicName, partitionIndex, offset = 0, batchSize = 10) {
