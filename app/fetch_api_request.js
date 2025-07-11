@@ -48,7 +48,7 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
         const recordBatch =
           logFileIndex === -1
             ? Buffer.from([0])
-            : readFromFileBuffer(topicName.toString(), partitionIndex);
+            : readFromFileBuffer(topicName.toString(), partitionIndex.readInt32BE());
         console.log("recordBatch", recordBatch);
         const partitionArrayBuffer = Buffer.concat([
           partitionLength,
@@ -90,29 +90,52 @@ function readFromFileBuffer(topicName, partitionIndex, offset = 0, batchSize = 1
         const logFilePath = `/tmp/kraft-combined-logs/${topicName}-${partitionIndex}/00000000000000000000.log`;
 
         if (!fs.existsSync(logFilePath)) {
-            throw new Error(`Log file not found: ${logFilePath}`);
+            console.error(`Log file not found: ${logFilePath}`);
+            return Buffer.from([0]); // Return empty buffer instead of throwing
         }
 
         const logFile = fs.readFileSync(logFilePath); // Read entire file
-        let messages = [];
-        let index = offset;
-
-        while (messages.length < batchSize && index < logFile.length) {
-            if (index + 4 > logFile.length) break; // Avoid out-of-bounds error
-
-            const messageSize = logFile.readInt32BE(index); // Read message size (4 bytes)
-            index += 4;
-
-            if (index + messageSize > logFile.length) break; // Ensure valid message size
-
-            const messageData = logFile.slice(index, index + messageSize); // Extract message
-            messages.push(messageData.toString()); // Convert buffer to string
-            index += messageSize; // Move to next message
+        
+        // For now, return the raw log file content as a simple record batch
+        // In a real implementation, this would need proper Kafka record batch formatting
+        if (logFile.length === 0) {
+            return Buffer.from([0]); // Empty batch
         }
-
-        return { messages, nextOffset: index }; // Return messages & next offset for pagination
+        
+        // Create a simple record batch structure
+        const baseOffset = Buffer.from([0, 0, 0, 0, 0, 0, 0, 0]); // int64
+        const batchLength = Buffer.alloc(4);
+        batchLength.writeInt32BE(logFile.length + 49); // batch overhead + data
+        const partitionLeaderEpoch = Buffer.from([0, 0, 0, 0]); // int32
+        const magicByte = Buffer.from([2]); // int8
+        const crc = Buffer.from([0, 0, 0, 0]); // int32 (would normally calculate this)
+        const attributes = Buffer.from([0, 0]); // int16
+        const lastOffsetDelta = Buffer.from([0, 0, 0, 0]); // int32
+        const baseTimestamp = Buffer.from([0, 0, 0, 0, 0, 0, 0, 0]); // int64
+        const maxTimestamp = Buffer.from([0, 0, 0, 0, 0, 0, 0, 0]); // int64
+        const producerId = Buffer.from([0, 0, 0, 0, 0, 0, 0, 0]); // int64
+        const producerEpoch = Buffer.from([0, 0]); // int16
+        const baseSequence = Buffer.from([0, 0, 0, 0]); // int32
+        const records = Buffer.from([0, 0, 0, 1]); // int32 (record count)
+        
+        return Buffer.concat([
+            baseOffset,
+            batchLength,
+            partitionLeaderEpoch,
+            magicByte,
+            crc,
+            attributes,
+            lastOffsetDelta,
+            baseTimestamp,
+            maxTimestamp,
+            producerId,
+            producerEpoch,
+            baseSequence,
+            records,
+            logFile // actual message data
+        ]);
     } catch (error) {
         console.error("Error reading log file:", error);
-        return { messages: [], nextOffset: offset };
+        return Buffer.from([0]); // Return empty buffer on error
     }
 }
