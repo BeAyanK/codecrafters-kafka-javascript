@@ -7,11 +7,10 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
   const throttleTime = Buffer.from([0, 0, 0, 0]);
   const errorCode = Buffer.from([0, 0]);
   const tagBuffer = Buffer.from([0]);
-  const sessionIdIndex = clientLengthValue + 28;
-  const sessionId = buffer.subarray(sessionIdIndex, sessionIdIndex + 4);
+  const sessionId = Buffer.from([0, 0, 0, 0]); // Default session ID
 
   // Build responses
-  let responses = Buffer.from([0]); // Start with empty topics array length
+  let responses = Buffer.from([0]); // Start with 0 topics by default
   const topicArrayLength = buffer.subarray(sessionIdIndex + 8, sessionIdIndex + 9);
   
   if (topicArrayLength.readInt8() > 0) {
@@ -30,9 +29,8 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
       const partitionError = logFileIndex === -1 ? Buffer.from([0, 100]) : Buffer.from([0, 0]);
       const topicName = logFileIndex === -1 ? "" : logFile.subarray(logFileIndex - 3, logFileIndex);
       
-      const partitionLength = buffer.subarray(topicIndex, topicIndex + 1);
-      const partitionIndex = buffer.subarray(topicIndex + 1, topicIndex + 5);
-      topicIndex += 5;
+      const partitionIndex = buffer.subarray(topicIndex, topicIndex + 4);
+      topicIndex += 4;
       
       const recordBatch = logFileIndex === -1
         ? Buffer.alloc(4, 0)
