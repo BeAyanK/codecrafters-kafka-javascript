@@ -107,7 +107,7 @@ function readFromFileBuffer(topicName, partitionIndex, offset = 0, batchSize = 1
 
             const messageData = logFile.slice(index, index + messageSize); // Extract message
             messages.push(messageData.toString()); // Convert buffer to string
-            index += messageSize; 
+            index += messageSize; // Move to next message
         }
 
         return { messages, nextOffset: index }; // Return messages & next offset for pagination
