@@ -4,6 +4,7 @@ import { sendResponseMessage, pick } from "./utils/index.js";
 import { handleApiVersionsRequest } from "./api_versions_request.js";
 import { parseRequest } from "./request_parser.js";
 import { handleDescribeTopicPartitionsRequest } from "./describe_topic_partitions_request.js";
+import { handleFetchApiRequest } from "./fetch_api_request.js";
 
 const server = net.createServer((connection) => {
   connection.on("data", (buffer) => {
@@ -21,6 +22,8 @@ const server = net.createServer((connection) => {
 
     if (requestApiKey.readInt16BE() === 18) {
       handleApiVersionsRequest(connection, responseMessage, requestVersion);
+    } else if (requestApiKey.readInt16BE() === 1) {
+      handleFetchApiRequest(connection, responseMessage, buffer);
     } else if (requestApiKey.readInt16BE() === 75) {
       handleDescribeTopicPartitionsRequest(connection, responseMessage, buffer);
     } else {

@@ -30,10 +30,7 @@ export const apiVersioningResponseFields = (version) => {
 export const calculateMessageSize = (message, requestVersion) => {
   return Buffer.concat(
     Object.values(
-      pick(
-        message,
-        ...apiVersioningResponseFields(requestVersion),
-      ),
+      pick(message, ...apiVersioningResponseFields(requestVersion)),
     ),
   ).length;
-}
+};
