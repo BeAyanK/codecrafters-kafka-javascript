@@ -1,7 +1,39 @@
 import fs from "fs";
 import path from "path";
 
-// Helper functions remain the same...
+function readVarInt(buffer, offset) {
+  let value = 0;
+  let shift = 0;
+  let byte;
+  do {
+    if (offset >= buffer.length) {
+      throw new Error("Buffer out of bounds when reading VarInt");
+    }
+    byte = buffer.readUInt8(offset++);
+    value |= (byte & 0x7f) << shift;
+    shift += 7;
+  } while ((byte & 0x80) !== 0);
+  return { value, offset };
+}
+
+// Helper: Write VarInt (compact integer)
+function writeVarInt(value) {
+  const buffer = [];
+  while ((value & 0x7f) !== value) {
+    buffer.push((value & 0x7f) | 0x80);
+    value >>>= 7;
+  }
+  buffer.push(value);
+  return Buffer.from(buffer);
+}
+
+// Helper: Write Compact Bytes (used for recordBatch)
+function writeCompactBytes(data) {
+  // For Compact Bytes, the VarInt represents (length + 1).
+  // So, if data.length is 0, the VarInt should be 1.
+  const length = writeVarInt(data.length + 1);
+  return Buffer.concat([length, data]);
+}
 
 // Global map to store topicId (hex string) to topicName mapping
 let topicIdToNameMap = new Map();
