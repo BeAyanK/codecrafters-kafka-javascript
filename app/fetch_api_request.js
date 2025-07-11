@@ -145,76 +145,26 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
         if (fs.existsSync(logFilePath)) {
           const fileContent = fs.readFileSync(logFilePath);
 
-          // Construct RecordBatch (v2 magic byte)
-          // Refer to Kafka protocol documentation for precise structure.
-          const baseOffset = Buffer.alloc(8).fill(0); // int64
-          const batchLengthPlaceholder = Buffer.alloc(4); // int32 (will be filled later)
-          const partitionLeaderEpochForBatch = Buffer.alloc(4).fill(0); // int32
-          const magicByte = Buffer.from([2]); // int8
-          const crc = Buffer.alloc(4).fill(0); // int32 (placeholder for simplicity)
-          const attributes = Buffer.alloc(2).fill(0); // int16
-          const lastOffsetDelta = Buffer.alloc(4).fill(0); // int32
-          const baseTimestamp = Buffer.alloc(8).fill(0); // int64
-          const maxTimestamp = Buffer.alloc(8).fill(0); // int64
-          const producerId = Buffer.alloc(8).fill(0); // int64
-          const producerEpoch = Buffer.alloc(2).fill(0); // int16
-          const baseSequence = Buffer.alloc(4).fill(0); // int32
-          const recordsCountVarInt = writeVarInt(1); // One record for the entire file content
-
-          // Single Kafka Record structure (value is the file content)
-          const recordAttributes = Buffer.from([0]); // int8
-          const timestampDelta = writeVarInt(0);
-          const offsetDelta = writeVarInt(0);
-          const keyLength = writeVarInt(0); // No key
-          const valueLength = writeVarInt(fileContent.length);
-          const value = fileContent;
-          const headers = writeVarInt(0); // No headers (compact array of 0 elements = VarInt(1))
-
-          const singleRecord = Buffer.concat([
-            recordAttributes,
-            timestampDelta,
-            offsetDelta,
-            keyLength,
-            valueLength,
-            value,
-            headers
-          ]);
-          
-          const recordBatchCore = Buffer.concat([
-            partitionLeaderEpochForBatch,
-            magicByte,
-            crc,
-            attributes,
-            lastOffsetDelta,
-            baseTimestamp,
-            maxTimestamp,
-            producerId,
-            producerEpoch,
-            baseSequence,
-            recordsCountVarInt,
-            singleRecord // The actual record(s)
-          ]);
-
-          batchLengthPlaceholder.writeInt32BE(recordBatchCore.length); // Fill batchLength
-
-          const fullRecordBatch = Buffer.concat([
-            baseOffset,
-            batchLengthPlaceholder,
-            recordBatchCore
-          ]);
-
-          recordBatchBuffer = writeCompactBytes(fullRecordBatch); // Wrap the entire RecordBatch with compact bytes length
+          // For this stage, the log file itself contains the full RecordBatch.
+          // We just need to wrap its contents as COMPACT_BYTES.
+          recordBatchBuffer = writeCompactBytes(fileContent);
         }
       } catch (error) {
         console.error("Error reading log file for partition:", error);
       }
+      
+      const partitionIndexBuffer = Buffer.alloc(4);
+      partitionIndexBuffer.writeInt32BE(partitionIndex);
+
+      const currentLeaderEpochBuffer = Buffer.alloc(4);
+      currentLeaderEpochBuffer.writeInt32BE(currentLeaderEpoch);
 
       const partitionResponse = Buffer.concat([
-        Buffer.alloc(4).writeInt32BE(partitionIndex),       // partition_index: INT32
+        partitionIndexBuffer,                               // partition_index: INT32
         errorCode,                                          // error_code: INT16
         Buffer.alloc(8).fill(0),                            // high_watermark: INT64 (0 as per requirement)
         Buffer.alloc(8).fill(0),                            // last_stable_offset: INT64 (0 as per requirement)
-        Buffer.alloc(4).writeInt32BE(currentLeaderEpoch),   // current_leader_epoch: INT32
+        currentLeaderEpochBuffer,                           // current_leader_epoch: INT32
         Buffer.alloc(8).fill(0),                            // log_start_offset: INT64 (0 as per requirement)
         writeVarInt(1),                                     // aborted_transactions: COMPACT_ARRAY (0 elements, so length is VarInt(1))
         responseTagBuffer,                                  // Tag buffer for aborted_transactions (compact arrays have tags)
@@ -248,9 +198,13 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
   // Correlation ID and Message Size
   const correlationIdBuffer = Buffer.alloc(4);
   correlationIdBuffer.writeInt32BE(responseMessage.correlationId);
+  
+  // For flexible versions (like v16), the header requires a tag buffer.
+  const responseHeaderTagBuffer = Buffer.from([0]);
 
   const fullResponseData = Buffer.concat([
     correlationIdBuffer,
+    responseHeaderTagBuffer, // This is the corrected line
     responseBody,
   ]);
 
