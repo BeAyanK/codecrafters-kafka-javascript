@@ -46,8 +46,13 @@ function loadTopicMetadata(logDir) {
     const entries = fs.readdirSync(logDir, { withFileTypes: true });
 
     for (const entry of entries) {
-      // Check if it's a directory like 'foo-0', 'pax-0', etc.
-      if (entry.isDirectory() && entry.name.includes('-')) {
+      // Only process directories that look like topic-partition directories, e.g., 'foo-0', 'pax-0'
+      // Exclude directories like '__cluster_metadata-0'
+      const isTopicPartitionDir = entry.isDirectory() && 
+                                  !entry.name.startsWith('__') && // Exclude internal Kafka dirs (like __cluster_metadata-0)
+                                  entry.name.includes('-');      // Should contain hyphen for topic-partition (e.g., topic-0)
+
+      if (isTopicPartitionDir) {
         const partitionMetadataPath = path.join(logDir, entry.name, "partition.metadata");
         if (fs.existsSync(partitionMetadataPath)) {
           const content = fs.readFileSync(partitionMetadataPath, 'utf8');
@@ -76,28 +81,22 @@ function loadTopicMetadata(logDir) {
         }
       }
     }
-    console.log(`Loaded topic metadata: ${JSON.stringify(Array.from(topicIdToNameMap.entries()))}`);
+    // Only log if not empty, to avoid spamming for empty test setups if any
+    if (topicIdToNameMap.size > 0) {
+      console.log(`[your_program] Loaded topic metadata: ${JSON.stringify(Array.from(topicIdToNameMap.entries()))}`);
+    } else {
+      console.log(`[your_program] No topic metadata loaded.`);
+    }
   } catch (error) {
-    console.error("Error loading topic metadata:", error);
+    console.error("[your_program] Error loading topic metadata:", error);
   }
 }
-
-// Call loadTopicMetadata once when the script starts (or on first request if needed)
-// The test runner provides /tmp/kraft-combined-logs as the log directory.
-// Assuming your main server file calls handleFetchApiRequest,
-// you'd call loadTopicMetadata at the start of your server process.
-// For this isolated function, we'll make it part of a wrapper, or assume it's called.
-// Since the tester runs it as a script, let's assume `handleFetchApiRequest` might be called multiple times.
-// So, we'll make sure `loadTopicMetadata` is only called once.
 
 let metadataLoaded = false;
 
 export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
     if (!metadataLoaded) {
         // The /tmp/kraft-combined-logs path comes from the test runner.
-        // You might need to pass this path into your server's main function
-        // or infer it from server.properties.
-        // For now, hardcode as per test logs.
         loadTopicMetadata("/tmp/kraft-combined-logs");
         metadataLoaded = true;
     }
@@ -110,16 +109,16 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
 
     let offset = 12; // Start after correlationId, at the RequestHeader TAG_BUFFER
 
-    // 1. Read RequestHeader TAG_BUFFER
+    // 1. Read RequestHeader TAG_BUFFER (flexible versions have a tag buffer in the header)
     offset += 1; // Consume the 0x00 Tag Buffer for RequestHeader
 
     // 2. Read Client ID (COMPACT_NULLABLE_STRING)
     let clientIdVarIntInfo = readVarInt(buffer, offset);
     offset = clientIdVarIntInfo.offset;
-    const clientIdLength = clientIdVarIntInfo.value - 1;
-    offset += clientIdLength;
+    const clientIdLength = clientIdVarIntInfo.value - 1; // Actual length of client ID string
+    offset += clientIdLength; // Advance past the client_id string data
 
-    // Now, parse the FetchRequest v16 body fields
+    // Now, parse the FetchRequest v16 body fields from the correct offset
     offset += 4; // replica_id (int32)
     offset += 4; // max_wait_ms (int32)
     offset += 4; // min_bytes (int32)
@@ -129,43 +128,44 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
     offset += 4; // session_epoch (int32)
 
     // topics: COMPACT_ARRAY of FetchTopic
+    // The VarInt here indicates the number of elements + 1.
     let topicArrayInfo = readVarInt(buffer, offset);
     offset = topicArrayInfo.offset;
-    const numTopics = topicArrayInfo.value - 1;
+    const numTopics = topicArrayInfo.value - 1; // This is correct for the number of topics to process.
 
     const topicResponses = [];
 
     for (let i = 0; i < numTopics; i++) {
         const topicIdBuffer = buffer.subarray(offset, offset + 16);
         offset += 16; // Advance past topic_id (UUID)
-        offset += 1; // Skip tag buffer for topic in request
+        offset += 1; // Skip tag buffer for topic in request (COMPACT_ARRAY of TaggedFields)
 
         // Lookup topic name using the pre-loaded map
         const topicName = topicIdToNameMap.get(topicIdBuffer.toString('hex'));
         if (!topicName) {
-            console.warn(`Could not find topic name for ID: ${topicIdBuffer.toString('hex')}. Skipping this topic.`);
-            // In a real scenario, you might want to return an error code for this topic
-            // or just skip it as done here. For this challenge, skipping means it won't be in response.
-            continue; // Skip this topic and move to the next in the request
+            console.warn(`[your_program] Could not find topic name for ID: ${topicIdBuffer.toString('hex')}. Skipping this topic.`);
+            // If topic name is not found, we skip this topic in the response.
+            continue; 
         }
 
         // partitions: COMPACT_ARRAY of FetchPartition
         let partitionArrayInfo = readVarInt(buffer, offset);
         offset = partitionArrayInfo.offset;
-        const numPartitions = partitionArrayInfo.value - 1;
+        const numPartitions = partitionArrayInfo.value - 1; // Actual number of partitions to process.
 
         const partitionResponses = [];
 
         for (let j = 0; j < numPartitions; j++) {
             const partitionIndex = buffer.readInt32BE(offset); offset += 4;
-            offset += 4; // current_leader_epoch
-            offset += 8; // fetch_offset
-            offset += 8; // log_start_offset
-            offset += 4; // partition_max_bytes
-            offset += 1; // partition tag buffer in request
+            offset += 4; // current_leader_epoch (INT32)
+            offset += 8; // fetch_offset (INT64)
+            offset += 8; // log_start_offset (INT64)
+            offset += 4; // partition_max_bytes (INT32)
+            offset += 1; // partition tag buffer in request (COMPACT_ARRAY of TaggedFields)
 
             let recordBatchBuffer;
             try {
+                // Only read log file if a topic name was successfully identified
                 const logFilePath = `/tmp/kraft-combined-logs/${topicName}-${partitionIndex}/00000000000000000000.log`;
                 if (fs.existsSync(logFilePath)) {
                     const fileContent = fs.readFileSync(logFilePath);
@@ -175,29 +175,29 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
                     recordBatchBuffer = writeCompactBytes(Buffer.alloc(0));
                 }
             } catch (error) {
-                console.error(`Error reading log file for partition ${topicName}-${partitionIndex}:`, error);
+                console.error(`[your_program] Error reading log file for partition ${topicName}-${partitionIndex}:`, error);
                 recordBatchBuffer = writeCompactBytes(Buffer.alloc(0)); // On error, send empty record batch
             }
-
+            
             const partitionIndexBuffer = Buffer.alloc(4);
             partitionIndexBuffer.writeInt32BE(partitionIndex);
 
             const partitionResponse = Buffer.concat([
                 partitionIndexBuffer,
                 errorCode, // error_code (INT16, 0 for NO_ERROR)
-                Buffer.alloc(8).fill(0), // high_watermark (INT64)
-                Buffer.alloc(8).fill(0), // last_stable_offset (INT64)
-                Buffer.alloc(8).fill(0), // log_start_offset (INT64)
+                Buffer.alloc(8).fill(0), // high_watermark (INT64) - Placeholder
+                Buffer.alloc(8).fill(0), // last_stable_offset (INT64) - Placeholder
+                Buffer.alloc(8).fill(0), // log_start_offset (INT64) - Placeholder
                 writeVarInt(0),          // aborted_transactions (COMPACT_ARRAY, 0 elements means VarInt 1)
-                Buffer.alloc(4).fill(0), // preferred_read_replica (INT32)
+                Buffer.alloc(4).fill(0), // preferred_read_replica (INT32) - Placeholder
                 recordBatchBuffer,       // records (COMPACT_BYTES)
-                responseTagBuffer,       // partition tag buffer
+                responseTagBuffer,       // partition tag buffer (COMPACT_ARRAY of TaggedFields)
             ]);
             partitionResponses.push(partitionResponse);
         }
-
+        
         const topicResponse = Buffer.concat([
-            topicIdBuffer, // Topic ID (UUID)
+            topicIdBuffer, // Topic ID (UUID) from request
             writeVarInt(partitionResponses.length + 1), // num_partitions (COMPACT_ARRAY length)
             ...partitionResponses,
             responseTagBuffer, // Topic tag buffer
@@ -205,6 +205,12 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
         topicResponses.push(topicResponse);
     }
 
+    // FetchResponse v16 structure:
+    // throttle_time_ms (INT32)
+    // error_code (INT16)
+    // session_id (INT32)
+    // responses (COMPACT_ARRAY of FetchableTopicResponse)
+    // tag_buffer (COMPACT_ARRAY of TaggedFields)
     const responseBody = Buffer.concat([
         throttleTime,
         errorCode,
@@ -220,7 +226,7 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
 
     const fullResponseData = Buffer.concat([
         correlationIdBuffer,
-        responseHeaderTagBuffer,
+        responseHeaderTagBuffer, // Header Tag Buffer
         responseBody,
     ]);
 
