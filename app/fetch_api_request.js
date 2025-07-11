@@ -1,5 +1,5 @@
 import fs from "fs";
-import path from "path"; // Import path module for path.join
+import path from "path";
 
 // Helper: Read VarInt (compact integer)
 function readVarInt(buffer, offset) {
@@ -8,6 +8,7 @@ function readVarInt(buffer, offset) {
   let byte;
   do {
     if (offset >= buffer.length) {
+      // This error indicates malformed input buffer, should not happen in valid Kafka protocol
       throw new Error("Buffer out of bounds when reading VarInt");
     }
     byte = buffer.readUInt8(offset++);
@@ -40,63 +41,65 @@ function writeCompactBytes(data) {
 // This will be initialized once.
 let topicIdToNameMap = new Map();
 
+// Flag to ensure metadata loading happens only once
+let metadataLoaded = false;
+
 // Function to load topic metadata from partition.metadata files
 function loadTopicMetadata(logDir) {
   try {
+    // Attempt to list directories inside logDir
     const entries = fs.readdirSync(logDir, { withFileTypes: true });
 
     for (const entry of entries) {
-      // Only process directories that look like topic-partition directories, e.g., 'foo-0', 'pax-0'
-      // Exclude directories like '__cluster_metadata-0'
+      // Check if it's a directory and looks like a topic-partition folder
+      // Example: "foo-0", "paz-1". Exclude internal Kafka dirs like "__cluster_metadata-0".
       const isTopicPartitionDir = entry.isDirectory() && 
-                                  !entry.name.startsWith('__') && // Exclude internal Kafka dirs (like __cluster_metadata-0)
-                                  entry.name.includes('-');      // Should contain hyphen for topic-partition (e.g., topic-0)
+                                  !entry.name.startsWith('__') && 
+                                  /^[a-zA-Z0-9_-]+-\d+$/.test(entry.name); // More specific regex: topic-name-partition-id
 
       if (isTopicPartitionDir) {
         const partitionMetadataPath = path.join(logDir, entry.name, "partition.metadata");
+        
         if (fs.existsSync(partitionMetadataPath)) {
           const content = fs.readFileSync(partitionMetadataPath, 'utf8');
-          let topicId = null;
-          let topicName = null;
+          let currentTopicId = null; // Use different variable names to avoid confusion
+          let currentTopicName = null;
 
           content.split('\n').forEach(line => {
             if (line.startsWith("topic.id=")) {
-              // The UUID in partition.metadata is typically in string form with hyphens
-              // e.g., "00000000-0000-0000-0000-000000000000"
-              // We need to convert it to the 16-byte buffer form received in Fetch requests
               const uuidString = line.substring("topic.id=".length);
-              // Ensure it's a valid UUID string format, remove hyphens
               const rawUuidHex = uuidString.replace(/-/g, '');
-              if (rawUuidHex.length === 32) { // 16 bytes = 32 hex chars
-                  topicId = rawUuidHex; // Store as hex string for map key
+              if (rawUuidHex.length === 32) {
+                  currentTopicId = rawUuidHex; // Store as hex string for map key
               }
             } else if (line.startsWith("topic.name=")) {
-              topicName = line.substring("topic.name=".length);
+              currentTopicName = line.substring("topic.name=".length);
             }
           });
 
-          if (topicId && topicName) {
-            topicIdToNameMap.set(topicId, topicName);
+          if (currentTopicId && currentTopicName) {
+            topicIdToNameMap.set(currentTopicId, currentTopicName);
           }
         }
       }
     }
-    // Only log if not empty, to avoid spamming for empty test setups if any
+    
+    // Log the outcome - CodeCrafters should pick this up
     if (topicIdToNameMap.size > 0) {
-      console.log(`[your_program] Loaded topic metadata: ${JSON.stringify(Array.from(topicIdToNameMap.entries()))}`);
+      console.error(`[your_program] Loaded topic metadata: ${JSON.stringify(Array.from(topicIdToNameMap.entries()))}`);
     } else {
-      console.log(`[your_program] No topic metadata loaded.`);
+      console.error(`[your_program] No topic metadata loaded from ${logDir}. This might be an issue.`);
     }
   } catch (error) {
-    console.error("[your_program] Error loading topic metadata:", error);
+    console.error(`[your_program] Error loading topic metadata from ${logDir}: ${error.message}`);
   }
 }
 
-let metadataLoaded = false;
 
 export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
+    // Load metadata only once
     if (!metadataLoaded) {
-        // The /tmp/kraft-combined-logs path comes from the test runner.
+        // The /tmp/kraft-combined-logs path is provided by the CodeCrafters tester
         loadTopicMetadata("/tmp/kraft-combined-logs");
         metadataLoaded = true;
     }
@@ -107,6 +110,7 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
     const sessionId = Buffer.alloc(4).fill(0);
     const responseTagBuffer = Buffer.from([0]); // Empty tag buffer for response body
 
+    // --- Start: Request Parsing ---
     let offset = 12; // Start after correlationId, at the RequestHeader TAG_BUFFER
 
     // 1. Read RequestHeader TAG_BUFFER (flexible versions have a tag buffer in the header)
@@ -126,12 +130,13 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
     offset += 1; // isolation_level (int8)
     offset += 4; // session_id (int32)
     offset += 4; // session_epoch (int32)
+    // --- End: Request Parsing ---
 
     // topics: COMPACT_ARRAY of FetchTopic
     // The VarInt here indicates the number of elements + 1.
     let topicArrayInfo = readVarInt(buffer, offset);
     offset = topicArrayInfo.offset;
-    const numTopics = topicArrayInfo.value - 1; // This is correct for the number of topics to process.
+    const numTopics = topicArrayInfo.value - 1; // Correct for the number of topics to process.
 
     const topicResponses = [];
 
@@ -142,9 +147,11 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
 
         // Lookup topic name using the pre-loaded map
         const topicName = topicIdToNameMap.get(topicIdBuffer.toString('hex'));
+        
         if (!topicName) {
-            console.warn(`[your_program] Could not find topic name for ID: ${topicIdBuffer.toString('hex')}. Skipping this topic.`);
-            // If topic name is not found, we skip this topic in the response.
+            // If topic name is not found, log a warning and skip this topic in the response.
+            // CodeCrafters logs will capture this if it happens.
+            console.error(`[your_program] WARN: Could not find topic name for ID: ${topicIdBuffer.toString('hex')}. Skipping this topic.`);
             continue; 
         }
 
@@ -165,17 +172,19 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
 
             let recordBatchBuffer;
             try {
-                // Only read log file if a topic name was successfully identified
+                // Construct the log file path using the found topicName and partitionIndex
                 const logFilePath = `/tmp/kraft-combined-logs/${topicName}-${partitionIndex}/00000000000000000000.log`;
+                
                 if (fs.existsSync(logFilePath)) {
                     const fileContent = fs.readFileSync(logFilePath);
                     recordBatchBuffer = writeCompactBytes(fileContent);
                 } else {
-                    // Log file does not exist, send empty record batch
+                    // If log file does not exist, send an empty record batch
                     recordBatchBuffer = writeCompactBytes(Buffer.alloc(0));
                 }
             } catch (error) {
-                console.error(`[your_program] Error reading log file for partition ${topicName}-${partitionIndex}:`, error);
+                // Log any errors during file reading
+                console.error(`[your_program] ERROR: Reading log file for partition ${topicName}-${partitionIndex}: ${error.message}`);
                 recordBatchBuffer = writeCompactBytes(Buffer.alloc(0)); // On error, send empty record batch
             }
             
@@ -185,11 +194,11 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
             const partitionResponse = Buffer.concat([
                 partitionIndexBuffer,
                 errorCode, // error_code (INT16, 0 for NO_ERROR)
-                Buffer.alloc(8).fill(0), // high_watermark (INT64) - Placeholder
-                Buffer.alloc(8).fill(0), // last_stable_offset (INT64) - Placeholder
-                Buffer.alloc(8).fill(0), // log_start_offset (INT64) - Placeholder
+                Buffer.alloc(8).fill(0), // high_watermark (INT64) - Placeholder value (0)
+                Buffer.alloc(8).fill(0), // last_stable_offset (INT64) - Placeholder value (0)
+                Buffer.alloc(8).fill(0), // log_start_offset (INT64) - Placeholder value (0)
                 writeVarInt(0),          // aborted_transactions (COMPACT_ARRAY, 0 elements means VarInt 1)
-                Buffer.alloc(4).fill(0), // preferred_read_replica (INT32) - Placeholder
+                Buffer.alloc(4).fill(0), // preferred_read_replica (INT32) - Placeholder value (0)
                 recordBatchBuffer,       // records (COMPACT_BYTES)
                 responseTagBuffer,       // partition tag buffer (COMPACT_ARRAY of TaggedFields)
             ]);
@@ -205,7 +214,7 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
         topicResponses.push(topicResponse);
     }
 
-    // FetchResponse v16 structure:
+    // Response Body structure for FetchResponse v16:
     // throttle_time_ms (INT32)
     // error_code (INT16)
     // session_id (INT32)
