@@ -1,5 +1,6 @@
 import fs from "fs";
 import { sendResponseMessage } from "./utils/index.js";
+
 export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
   const clientLength = buffer.subarray(12, 14);
   const clientLengthValue = clientLength.readInt16BE();
@@ -7,14 +8,12 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
   const errorCode = Buffer.from([0, 0]);
   let responses = Buffer.from([1]);
   const tagBuffer = Buffer.from([0]);
-  const sessionIdIndex = clientLengthValue + 28; // skip 15 bytes before and 13 bytes after client record
+  const sessionIdIndex = clientLengthValue + 28;
   const sessionId = buffer.subarray(sessionIdIndex, sessionIdIndex + 4);
   const _sessionEpoch = buffer.subarray(sessionIdIndex + 4, sessionIdIndex + 8);
-  const topicArrayLength = buffer.subarray(
-    sessionIdIndex + 8,
-    sessionIdIndex + 9,
-  );
+  const topicArrayLength = buffer.subarray(sessionIdIndex + 8, sessionIdIndex + 9);
   let topicIndex = sessionIdIndex + 9;
+
   if (topicArrayLength.readInt8() > 1) {
     const topics = new Array(topicArrayLength.readInt8() - 1)
       .fill(0)
@@ -32,24 +31,31 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
           topicName = logFile.subarray(logFileIndex - 3, logFileIndex);
         }
         const partitionArrayIndex = topicIndex;
-        const partitionLength = buffer.subarray(
-          partitionArrayIndex,
-          partitionArrayIndex + 1,
-        );
-        const partitionIndex = buffer.subarray(
-          partitionArrayIndex + 1,
-          partitionArrayIndex + 5,
-        );
+        const partitionLength = buffer.subarray(partitionArrayIndex, partitionArrayIndex + 1);
+        const partitionIndex = buffer.subarray(partitionArrayIndex + 1, partitionArrayIndex + 5);
         const highWaterMark = Buffer.from(new Array(8).fill(0));
         const last_stable_offset = Buffer.from(new Array(8).fill(0));
         const log_start_offset = Buffer.from(new Array(8).fill(0));
         const aborted_transactions = Buffer.from([0]);
         const preferredReadReplica = Buffer.from([0, 0, 0, 0]);
-        const recordBatch =
-          logFileIndex === -1
-            ? Buffer.from([0])
-            : readFromFileBuffer(topicName.toString(), partitionIndex);
-        console.log("recordBatch", recordBatch);
+        
+        // Get record batch as Buffer
+        let recordBatch = Buffer.from([0]); // Default empty batch
+        if (logFileIndex !== -1) {
+          try {
+            const logFilePath = `/tmp/kraft-combined-logs/${topicName.toString()}-${partitionIndex.readInt32BE()}/00000000000000000000.log`;
+            if (fs.existsSync(logFilePath)) {
+              recordBatch = fs.readFileSync(logFilePath);
+              // Prepend record length if needed
+              const recordsLength = Buffer.alloc(4);
+              recordsLength.writeInt32BE(recordBatch.length);
+              recordBatch = Buffer.concat([recordsLength, recordBatch]);
+            }
+          } catch (error) {
+            console.error("Error reading log file:", error);
+          }
+        }
+
         const partitionArrayBuffer = Buffer.concat([
           partitionLength,
           partitionIndex,
@@ -66,6 +72,7 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
       });
     responses = Buffer.concat([topicArrayLength, ...topics]);
   }
+
   let fetchRequestResponse = {
     correlationId: responseMessage.correlationId,
     responseHeaderTagbuffer: tagBuffer,
@@ -75,44 +82,14 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
     responses,
     tagBuffer,
   };
+
   const messageSizeBuffer = Buffer.alloc(4);
-  messageSizeBuffer.writeInt32BE([
-    Buffer.concat(Object.values(fetchRequestResponse)).length,
-  ]);
+  messageSizeBuffer.writeInt32BE(Buffer.concat(Object.values(fetchRequestResponse)).length);
+
   fetchRequestResponse = {
     messageSize: messageSizeBuffer,
     ...fetchRequestResponse,
   };
+
   sendResponseMessage(connection, fetchRequestResponse);
 };
-function readFromFileBuffer(topicName, partitionIndex, offset = 0, batchSize = 10) {
-    try {
-        const logFilePath = `/tmp/kraft-combined-logs/${topicName}-${partitionIndex}/00000000000000000000.log`;
-
-        if (!fs.existsSync(logFilePath)) {
-            throw new Error(`Log file not found: ${logFilePath}`);
-        }
-
-        const logFile = fs.readFileSync(logFilePath); // Read entire file
-        let messages = [];
-        let index = offset;
-
-        while (messages.length < batchSize && index < logFile.length) {
-            if (index + 4 > logFile.length) break; // Avoid out-of-bounds error
-
-            const messageSize = logFile.readInt32BE(index); // Read message size (4 bytes)
-            index += 4;
-
-            if (index + messageSize > logFile.length) break; // Ensure valid message size
-
-            const messageData = logFile.slice(index, index + messageSize); // Extract message
-            messages.push(messageData.toString()); // Convert buffer to string
-            index += messageSize; 
-        }
-
-        return { messages, nextOffset: index }; // Return messages & next offset for pagination
-    } catch (error) {
-        console.error("Error reading log file:", error);
-        return { messages: [], nextOffset: offset };
-    }
-}
