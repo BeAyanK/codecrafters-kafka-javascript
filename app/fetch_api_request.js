@@ -89,17 +89,23 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
     const sessionId = Buffer.alloc(4).fill(0);
     const responseTagBuffer = Buffer.from([0]);
 
-    // Parse request
-    let offset = 12;
-    const headerTagBuffer = buffer.readUInt8(offset++);
+    // Parse request - Fetch API v16
+    let offset = 12; // Skip message size (4) + API key (2) + API version (2) + correlation ID (4)
     
-    // Read client ID
+    // Read client ID (compact string)
     let clientIdVarIntInfo = readVarInt(buffer, offset);
     offset = clientIdVarIntInfo.offset;
     const clientIdLength = clientIdVarIntInfo.value - 1;
-    offset += clientIdLength;
-
-    // Read request body
+    console.error(`[your_program] DEBUG: Client ID length: ${clientIdLength}, offset: ${offset}`);
+    if (clientIdLength > 0) {
+        offset += clientIdLength;
+    }
+    
+    // Read TAG_BUFFER (should be 0)
+    const headerTagBuffer = buffer.readUInt8(offset++);
+    console.error(`[your_program] DEBUG: Header TAG_BUFFER: ${headerTagBuffer}, offset: ${offset}`);
+    
+    // Read request body fields
     const replicaId = buffer.readInt32BE(offset); offset += 4;
     const maxWaitMs = buffer.readInt32BE(offset); offset += 4;
     const minBytes = buffer.readInt32BE(offset); offset += 4;
@@ -108,42 +114,17 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
     const sessionIdFromReq = buffer.readInt32BE(offset); offset += 4;
     const sessionEpoch = buffer.readInt32BE(offset); offset += 4;
     
-    // Read topics array
+    console.error(`[your_program] DEBUG: After request body fields, offset: ${offset}`);
+    console.error(`[your_program] DEBUG: replicaId: ${replicaId}, maxWaitMs: ${maxWaitMs}, minBytes: ${minBytes}, maxBytes: ${maxBytes}`);
+    
+    // Read topics array (compact array)
     let topicArrayInfo = readVarInt(buffer, offset);
     offset = topicArrayInfo.offset;
     const numTopics = topicArrayInfo.value - 1;
 
-    const topicResponses = [];
+    console.error(`[your_program] DEBUG: VarInt value: ${topicArrayInfo.value}, Number of topics in request: ${numTopics}, offset: ${offset}`);
     
-    if (numTopics === 0) {
-        console.error(`[your_program] DEBUG: No topics in request, sending empty response`);
-        
-        // Return empty response when no topics are requested
-        const responseBody = Buffer.concat([
-            throttleTime,
-            errorCode,
-            sessionId,
-            writeVarInt(1), // num_responses = 0 (encoded as 1 for compact array)
-            responseTagBuffer
-        ]);
-
-        const correlationIdBuffer = Buffer.alloc(4);
-        correlationIdBuffer.writeInt32BE(responseMessage.correlationId);
-        const responseHeaderTagBuffer = Buffer.from([0]);
-
-        const fullResponseData = Buffer.concat([
-            correlationIdBuffer,
-            responseHeaderTagBuffer,
-            responseBody
-        ]);
-
-        const messageSizeBuffer = Buffer.alloc(4);
-        messageSizeBuffer.writeInt32BE(fullResponseData.length);
-
-        console.error(`[your_program] DEBUG: Sending empty response with ${fullResponseData.length} bytes`);
-        connection.write(Buffer.concat([messageSizeBuffer, fullResponseData]));
-        return;
-    }
+    const topicResponses = [];
 
     // Process topics from request
     for (let i = 0; i < numTopics; i++) {
@@ -161,6 +142,8 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
         offset = partitionArrayInfo.offset;
         const numPartitions = partitionArrayInfo.value - 1;
         
+        console.error(`[your_program] DEBUG: Number of partitions for topic ${topicIdHex}: ${numPartitions}`);
+        
         const partitionResponses = [];
         for (let j = 0; j < numPartitions; j++) {
             const partitionIndex = buffer.readInt32BE(offset); offset += 4;
@@ -171,6 +154,8 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
             offset += 8;
             const partitionMaxBytes = buffer.readInt32BE(offset); offset += 4;
             const partitionTagBuffer = buffer.readUInt8(offset++);
+            
+            console.error(`[your_program] DEBUG: Processing partition ${partitionIndex} for topic ${topicIdHex}`);
             
             // Create partition response
             const partitionResponseBuffer = Buffer.alloc(4);
@@ -197,6 +182,36 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
             responseTagBuffer
         ]);
         topicResponses.push(topicResponse);
+    }
+
+    // If no topics were processed but we expected some, create a default response
+    if (topicResponses.length === 0 && numTopics > 0) {
+        console.error(`[your_program] DEBUG: No topics processed, creating default response`);
+        // This shouldn't happen with proper parsing, but as a fallback
+        const responseBody = Buffer.concat([
+            throttleTime,
+            errorCode,
+            sessionId,
+            writeVarInt(1), // num_responses = 0 (encoded as 1 for compact array)
+            responseTagBuffer
+        ]);
+
+        const correlationIdBuffer = Buffer.alloc(4);
+        correlationIdBuffer.writeInt32BE(responseMessage.correlationId);
+        const responseHeaderTagBuffer = Buffer.from([0]);
+
+        const fullResponseData = Buffer.concat([
+            correlationIdBuffer,
+            responseHeaderTagBuffer,
+            responseBody
+        ]);
+
+        const messageSizeBuffer = Buffer.alloc(4);
+        messageSizeBuffer.writeInt32BE(fullResponseData.length);
+
+        console.error(`[your_program] DEBUG: Sending default response with ${fullResponseData.length} bytes`);
+        connection.write(Buffer.concat([messageSizeBuffer, fullResponseData]));
+        return;
     }
 
     // Build response
