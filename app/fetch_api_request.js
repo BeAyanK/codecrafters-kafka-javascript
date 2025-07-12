@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 
-// Helper functions
+// Helper functions (remain unchanged from previous version, as they are generic)
 function readVarInt(buffer, offset) {
   let value = 0;
   let shift = 0;
@@ -57,20 +57,20 @@ function loadTopicMetadata(logDir) {
 
           content.split(/\r?\n/).forEach(line => {
             const trimmedLine = line.trim();
-            const parts = trimmedLine.split('=');
-            
+            const parts = trimmedLine.split('='); // Split by '='
+
             // Robust parsing for key=value lines
             if (parts.length === 2) {
-                const key = parts[0].trim();
-                const value = parts[1].trim();
+                const key = parts[0].trim(); // Trim the key part
+                const value = parts[1].trim(); // Trim the value part
 
-                if (key === "topic.id") {
+                if (key === "topic.id") { // Check trimmed key
                     const uuidString = value;
                     const rawUuidHex = uuidString.replace(/-/g, '').toLowerCase();
                     if (rawUuidHex.length === 32) {
                         topicIdFromMetadata = rawUuidHex;
                     }
-                } else if (key === "topic.name") {
+                } else if (key === "topic.name") { // Check trimmed key
                     topicNameFromMetadata = value;
                 }
             }
@@ -108,21 +108,21 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
     const throttleTime = Buffer.alloc(4).fill(0);
     const errorCode = Buffer.alloc(2).fill(0);
     const sessionId = Buffer.alloc(4).fill(0);
-    const responseTagBuffer = Buffer.from([0]);
+    const responseTagBuffer = Buffer.from([0]); // Empty tag buffer for response body
 
     // Request parsing:
     // Message Size (4) + API Key (2) + API Version (2) + Correlation ID (4) = 12 bytes
     let offset = 12; 
     
     // DEBUG: Log initial bytes to diagnose offset issues
-    console.error(`[your_program] DEBUG: Buffer at offset ${offset}: ${buffer.subarray(offset, offset + 10).toString('hex')}`); // Peek next 10 bytes
+    console.error(`[your_program] DEBUG: Buffer at offset ${offset}: ${buffer.subarray(offset, offset + 10).toString('hex')}`);
 
-    // The byte at 'offset' (which is 12) should be the RequestHeader TAG_BUFFER (0x00 for no tags)
+    // Read RequestHeader TAG_BUFFER (flexible versions have a tag buffer in the header).
+    // This is the byte at offset 12.
     const headerTagBuffer = buffer.readUInt8(offset++); 
     console.error(`[your_program] DEBUG: Read Header TAG_BUFFER: ${headerTagBuffer}, New offset: ${offset}`);
 
     // Read Client ID (compact string: VarInt length + bytes).
-    // The VarInt value itself determines length: 0 means null, >0 means (length + 1).
     let clientIdLengthVarIntInfo = readVarInt(buffer, offset);
     offset = clientIdLengthVarIntInfo.offset;
     const clientIdStringLength = clientIdLengthVarIntInfo.value === 0 ? -1 : clientIdLengthVarIntInfo.value - 1; 
@@ -131,7 +131,7 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
     
     if (clientIdStringLength >= 0) { 
         console.error(`[your_program] DEBUG: Reading Client ID string: ${buffer.subarray(offset, offset + clientIdStringLength).toString('utf8')}`);
-        offset += clientIdStringLength; // Advance past the actual string bytes
+        offset += clientIdStringLength; 
     } else {
         console.error(`[your_program] DEBUG: Client ID is NULL.`);
     }
@@ -145,6 +145,11 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
     const sessionIdFromReq = buffer.readInt32BE(offset); offset += 4;
     const sessionEpoch = buffer.readInt32BE(offset); offset += 4;
     
+    // FIX: Missing TAG_BUFFER after session_epoch for FetchRequest v16
+    // This is the common pattern for flexible API versions: fixed fields, then TaggedFields.
+    const requestBodyTagBuffer = buffer.readUInt8(offset++); 
+    console.error(`[your_program] DEBUG: Read Request Body TAG_BUFFER: ${requestBodyTagBuffer}, New offset: ${offset}`);
+
     console.error(`[your_program] DEBUG: After fixed request body fields, offset: ${offset}`);
     console.error(`[your_program] DEBUG: replicaId: ${replicaId}, maxWaitMs: ${maxWaitMs}, minBytes: ${minBytes}, maxBytes: ${maxBytes}, isolationLevel: ${isolationLevel}, sessionId: ${sessionIdFromReq}, sessionEpoch: ${sessionEpoch}`);
     
@@ -234,7 +239,7 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
             topicResponses.push(topicResponse);
         }
     } else {
-        console.error(`[your_program] DEBUG: Request specified 0 topics. This might indicate an issue with request parsing.`);
+        console.error(`[your_program] DEBUG: Request specified 0 topics. This indicates an issue with request parsing (missing TaggedFields or incorrect offset).`);
     }
 
     const responseBody = Buffer.concat([
