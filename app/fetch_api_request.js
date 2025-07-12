@@ -120,7 +120,10 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
     // Read topics array (compact array)
     let topicArrayInfo = readVarInt(buffer, offset);
     offset = topicArrayInfo.offset;
-    const numTopics = topicArrayInfo.value - 1;
+    
+    // Fix: For compact arrays, 0 means empty, 1 means 1 element, etc.
+    // Only subtract 1 if the value is > 0
+    const numTopics = topicArrayInfo.value > 0 ? topicArrayInfo.value - 1 : 0;
 
     console.error(`[your_program] DEBUG: VarInt value: ${topicArrayInfo.value}, Number of topics in request: ${numTopics}, offset: ${offset}`);
     
@@ -140,7 +143,7 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
         // Process partitions
         let partitionArrayInfo = readVarInt(buffer, offset);
         offset = partitionArrayInfo.offset;
-        const numPartitions = partitionArrayInfo.value - 1;
+        const numPartitions = partitionArrayInfo.value > 0 ? partitionArrayInfo.value - 1 : 0;
         
         console.error(`[your_program] DEBUG: Number of partitions for topic ${topicIdHex}: ${numPartitions}`);
         
@@ -182,36 +185,6 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
             responseTagBuffer
         ]);
         topicResponses.push(topicResponse);
-    }
-
-    // If no topics were processed but we expected some, create a default response
-    if (topicResponses.length === 0 && numTopics > 0) {
-        console.error(`[your_program] DEBUG: No topics processed, creating default response`);
-        // This shouldn't happen with proper parsing, but as a fallback
-        const responseBody = Buffer.concat([
-            throttleTime,
-            errorCode,
-            sessionId,
-            writeVarInt(1), // num_responses = 0 (encoded as 1 for compact array)
-            responseTagBuffer
-        ]);
-
-        const correlationIdBuffer = Buffer.alloc(4);
-        correlationIdBuffer.writeInt32BE(responseMessage.correlationId);
-        const responseHeaderTagBuffer = Buffer.from([0]);
-
-        const fullResponseData = Buffer.concat([
-            correlationIdBuffer,
-            responseHeaderTagBuffer,
-            responseBody
-        ]);
-
-        const messageSizeBuffer = Buffer.alloc(4);
-        messageSizeBuffer.writeInt32BE(fullResponseData.length);
-
-        console.error(`[your_program] DEBUG: Sending default response with ${fullResponseData.length} bytes`);
-        connection.write(Buffer.concat([messageSizeBuffer, fullResponseData]));
-        return;
     }
 
     // Build response
