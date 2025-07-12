@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 
+// Helper functions
 function readVarInt(buffer, offset) {
   let value = 0;
   let shift = 0;
@@ -16,7 +17,6 @@ function readVarInt(buffer, offset) {
   return { value, offset };
 }
 
-// Helper: Write VarInt (compact integer)
 function writeVarInt(value) {
   const buffer = [];
   while ((value & 0x7f) !== value) {
@@ -27,10 +27,7 @@ function writeVarInt(value) {
   return Buffer.from(buffer);
 }
 
-// Helper: Write Compact Bytes (used for recordBatch)
 function writeCompactBytes(data) {
-  // For Compact Bytes, the VarInt represents (length + 1).
-  // So, if data.length is 0, the VarInt should be 1.
   const length = writeVarInt(data.length + 1);
   return Buffer.concat([length, data]);
 }
@@ -52,21 +49,20 @@ function loadTopicMetadata(logDir) {
     for (const entry of entries) {
       if (entry.isDirectory() && !entry.name.startsWith('__')) {
         const [topicName, partition] = entry.name.split('-');
-        if (!topicName || !partition) continue;
+        if (!topicName || partition === undefined) continue;
 
         const partitionMetadataPath = path.join(logDir, entry.name, "partition.metadata");
         if (fs.existsSync(partitionMetadataPath)) {
           const content = fs.readFileSync(partitionMetadataPath, 'utf8');
           
-          let currentTopicId = null;
           content.split(/\r?\n/).forEach(line => {
             const trimmedLine = line.trim();
             if (trimmedLine.startsWith("topic_id=")) {
               const uuidString = trimmedLine.substring("topic_id=".length);
               const rawUuidHex = uuidString.replace(/-/g, '').toLowerCase();
               if (rawUuidHex.length === 32) {
-                currentTopicId = rawUuidHex;
-                topicIdToNameMap.set(currentTopicId, topicName);
+                topicIdToNameMap.set(rawUuidHex, topicName);
+                console.error(`[your_program] DEBUG: Loaded topic mapping: ${rawUuidHex} -> ${topicName}`);
               }
             }
           });
@@ -119,73 +115,88 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
 
     const topicResponses = [];
     
-    // For testing purposes, we'll respond with a single topic "pax" if no topics found
-    if (numTopics === 0 || topicIdToNameMap.size === 0) {
-        console.error(`[your_program] DEBUG: No topics in request or no metadata found, using default response`);
+    if (numTopics === 0) {
+        console.error(`[your_program] DEBUG: No topics in request, sending empty response`);
         
-        // Create a default response for topic "pax" partition 0
-        const topicId = Buffer.from('AAAAAAAAQACAAAAAAAAAYQ', 'base64');
-        const partitionResponse = Buffer.concat([
-            Buffer.alloc(4).fill(0), // partition_index
+        // Return empty response when no topics are requested
+        const responseBody = Buffer.concat([
+            throttleTime,
             errorCode,
-            Buffer.alloc(8).fill(0), // high_watermark
-            Buffer.alloc(8).fill(0), // last_stable_offset
-            Buffer.alloc(8).fill(0), // log_start_offset
-            writeVarInt(1), // aborted_transactions (empty array)
-            Buffer.alloc(4).fill(0), // preferred_read_replica
-            writeCompactBytes(Buffer.alloc(0)), // empty records
+            sessionId,
+            writeVarInt(1), // num_responses = 0 (encoded as 1 for compact array)
             responseTagBuffer
         ]);
+
+        const correlationIdBuffer = Buffer.alloc(4);
+        correlationIdBuffer.writeInt32BE(responseMessage.correlationId);
+        const responseHeaderTagBuffer = Buffer.from([0]);
+
+        const fullResponseData = Buffer.concat([
+            correlationIdBuffer,
+            responseHeaderTagBuffer,
+            responseBody
+        ]);
+
+        const messageSizeBuffer = Buffer.alloc(4);
+        messageSizeBuffer.writeInt32BE(fullResponseData.length);
+
+        console.error(`[your_program] DEBUG: Sending empty response with ${fullResponseData.length} bytes`);
+        connection.write(Buffer.concat([messageSizeBuffer, fullResponseData]));
+        return;
+    }
+
+    // Process topics from request
+    for (let i = 0; i < numTopics; i++) {
+        const topicIdBuffer = buffer.subarray(offset, offset + 16);
+        offset += 16;
+        const topicTagBuffer = buffer.readUInt8(offset++);
+        
+        const topicIdHex = topicIdBuffer.toString('hex');
+        const topicName = topicIdToNameMap.get(topicIdHex) || 'unknown';
+        
+        console.error(`[your_program] DEBUG: Processing topic ${topicIdHex} -> ${topicName}`);
+        
+        // Process partitions
+        let partitionArrayInfo = readVarInt(buffer, offset);
+        offset = partitionArrayInfo.offset;
+        const numPartitions = partitionArrayInfo.value - 1;
+        
+        const partitionResponses = [];
+        for (let j = 0; j < numPartitions; j++) {
+            const partitionIndex = buffer.readInt32BE(offset); offset += 4;
+            const currentLogOffset = buffer.readInt64BE ? buffer.readBigInt64BE(offset) : buffer.readInt32BE(offset + 4);
+            offset += 8;
+            const lastFetchedEpoch = buffer.readInt32BE(offset); offset += 4;
+            const fetchOffset = buffer.readInt64BE ? buffer.readBigInt64BE(offset) : buffer.readInt32BE(offset + 4);
+            offset += 8;
+            const partitionMaxBytes = buffer.readInt32BE(offset); offset += 4;
+            const partitionTagBuffer = buffer.readUInt8(offset++);
+            
+            // Create partition response
+            const partitionResponseBuffer = Buffer.alloc(4);
+            partitionResponseBuffer.writeInt32BE(partitionIndex);
+            
+            const partitionResponse = Buffer.concat([
+                partitionResponseBuffer,
+                errorCode,
+                Buffer.alloc(8).fill(0), // high_watermark
+                Buffer.alloc(8).fill(0), // last_stable_offset
+                Buffer.alloc(8).fill(0), // log_start_offset
+                writeVarInt(1), // aborted_transactions (empty array)
+                Buffer.alloc(4).fill(0), // preferred_read_replica
+                writeCompactBytes(Buffer.alloc(0)), // empty records
+                responseTagBuffer
+            ]);
+            partitionResponses.push(partitionResponse);
+        }
         
         const topicResponse = Buffer.concat([
-            topicId,
-            writeVarInt(2), // num_partitions (1 + 1)
-            partitionResponse,
+            topicIdBuffer, // Use the original topic ID from request
+            writeVarInt(partitionResponses.length + 1),
+            ...partitionResponses,
             responseTagBuffer
         ]);
         topicResponses.push(topicResponse);
-    } else {
-        // Process actual topics from request
-        for (let i = 0; i < numTopics; i++) {
-            const topicIdBuffer = buffer.subarray(offset, offset + 16);
-            offset += 16;
-            const topicTagBuffer = buffer.readUInt8(offset++);
-            
-            const topicIdHex = topicIdBuffer.toString('hex');
-            const topicName = topicIdToNameMap.get(topicIdHex) || 'unknown';
-            
-            // Process partitions
-            let partitionArrayInfo = readVarInt(buffer, offset);
-            offset = partitionArrayInfo.offset;
-            const numPartitions = partitionArrayInfo.value - 1;
-            
-            const partitionResponses = [];
-            for (let j = 0; j < numPartitions; j++) {
-                const partitionIndex = buffer.readInt32BE(offset); offset += 4;
-                offset += 4 + 8 + 8 + 4 + 1; // skip other partition fields
-                
-                const partitionResponse = Buffer.concat([
-                    Buffer.alloc(4).writeInt32BE(partitionIndex),
-                    errorCode,
-                    Buffer.alloc(8).fill(0), // high_watermark
-                    Buffer.alloc(8).fill(0), // last_stable_offset
-                    Buffer.alloc(8).fill(0), // log_start_offset
-                    writeVarInt(1), // aborted_transactions
-                    Buffer.alloc(4).fill(0), // preferred_read_replica
-                    writeCompactBytes(Buffer.alloc(0)), // empty records
-                    responseTagBuffer
-                ]);
-                partitionResponses.push(partitionResponse);
-            }
-            
-            const topicResponse = Buffer.concat([
-                topicIdBuffer,
-                writeVarInt(partitionResponses.length + 1),
-                ...partitionResponses,
-                responseTagBuffer
-            ]);
-            topicResponses.push(topicResponse);
-        }
     }
 
     // Build response
