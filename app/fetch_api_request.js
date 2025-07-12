@@ -130,61 +130,118 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
     const topicResponses = [];
 
     // Process topics from request
-    for (let i = 0; i < numTopics; i++) {
-        const topicIdBuffer = buffer.subarray(offset, offset + 16);
-        offset += 16;
-        const topicTagBuffer = buffer.readUInt8(offset++);
-        
-        const topicIdHex = topicIdBuffer.toString('hex');
-        const topicName = topicIdToNameMap.get(topicIdHex) || 'unknown';
-        
-        console.error(`[your_program] DEBUG: Processing topic ${topicIdHex} -> ${topicName}`);
-        
-        // Process partitions
-        let partitionArrayInfo = readVarInt(buffer, offset);
-        offset = partitionArrayInfo.offset;
-        const numPartitions = partitionArrayInfo.value > 0 ? partitionArrayInfo.value - 1 : 0;
-        
-        console.error(`[your_program] DEBUG: Number of partitions for topic ${topicIdHex}: ${numPartitions}`);
-        
-        const partitionResponses = [];
-        for (let j = 0; j < numPartitions; j++) {
-            const partitionIndex = buffer.readInt32BE(offset); offset += 4;
-            const currentLogOffset = buffer.readInt64BE ? buffer.readBigInt64BE(offset) : buffer.readInt32BE(offset + 4);
-            offset += 8;
-            const lastFetchedEpoch = buffer.readInt32BE(offset); offset += 4;
-            const fetchOffset = buffer.readInt64BE ? buffer.readBigInt64BE(offset) : buffer.readInt32BE(offset + 4);
-            offset += 8;
-            const partitionMaxBytes = buffer.readInt32BE(offset); offset += 4;
-            const partitionTagBuffer = buffer.readUInt8(offset++);
+    if (numTopics > 0) {
+        // Process specific topics requested
+        for (let i = 0; i < numTopics; i++) {
+            const topicIdBuffer = buffer.subarray(offset, offset + 16);
+            offset += 16;
+            const topicTagBuffer = buffer.readUInt8(offset++);
             
-            console.error(`[your_program] DEBUG: Processing partition ${partitionIndex} for topic ${topicIdHex}`);
+            const topicIdHex = topicIdBuffer.toString('hex');
+            const topicName = topicIdToNameMap.get(topicIdHex) || 'unknown';
             
-            // Create partition response
-            const partitionResponseBuffer = Buffer.alloc(4);
-            partitionResponseBuffer.writeInt32BE(partitionIndex);
+            console.error(`[your_program] DEBUG: Processing topic ${topicIdHex} -> ${topicName}`);
             
-            const partitionResponse = Buffer.concat([
-                partitionResponseBuffer,
-                errorCode,
-                Buffer.alloc(8).fill(0), // high_watermark
-                Buffer.alloc(8).fill(0), // last_stable_offset
-                Buffer.alloc(8).fill(0), // log_start_offset
-                writeVarInt(1), // aborted_transactions (empty array)
-                Buffer.alloc(4).fill(0), // preferred_read_replica
-                writeCompactBytes(Buffer.alloc(0)), // empty records
+            // Process partitions
+            let partitionArrayInfo = readVarInt(buffer, offset);
+            offset = partitionArrayInfo.offset;
+            const numPartitions = partitionArrayInfo.value > 0 ? partitionArrayInfo.value - 1 : 0;
+            
+            console.error(`[your_program] DEBUG: Number of partitions for topic ${topicIdHex}: ${numPartitions}`);
+            
+            const partitionResponses = [];
+            for (let j = 0; j < numPartitions; j++) {
+                const partitionIndex = buffer.readInt32BE(offset); offset += 4;
+                const currentLogOffset = buffer.readInt64BE ? buffer.readBigInt64BE(offset) : buffer.readInt32BE(offset + 4);
+                offset += 8;
+                const lastFetchedEpoch = buffer.readInt32BE(offset); offset += 4;
+                const fetchOffset = buffer.readInt64BE ? buffer.readBigInt64BE(offset) : buffer.readInt32BE(offset + 4);
+                offset += 8;
+                const partitionMaxBytes = buffer.readInt32BE(offset); offset += 4;
+                const partitionTagBuffer = buffer.readUInt8(offset++);
+                
+                console.error(`[your_program] DEBUG: Processing partition ${partitionIndex} for topic ${topicIdHex}`);
+                
+                // Create partition response
+                const partitionResponseBuffer = Buffer.alloc(4);
+                partitionResponseBuffer.writeInt32BE(partitionIndex);
+                
+                const partitionResponse = Buffer.concat([
+                    partitionResponseBuffer,
+                    errorCode,
+                    Buffer.alloc(8).fill(0), // high_watermark
+                    Buffer.alloc(8).fill(0), // last_stable_offset
+                    Buffer.alloc(8).fill(0), // log_start_offset
+                    writeVarInt(1), // aborted_transactions (empty array)
+                    Buffer.alloc(4).fill(0), // preferred_read_replica
+                    writeCompactBytes(Buffer.alloc(0)), // empty records
+                    responseTagBuffer
+                ]);
+                partitionResponses.push(partitionResponse);
+            }
+            
+            const topicResponse = Buffer.concat([
+                topicIdBuffer, // Use the original topic ID from request
+                writeVarInt(partitionResponses.length + 1),
+                ...partitionResponses,
                 responseTagBuffer
             ]);
-            partitionResponses.push(partitionResponse);
+            topicResponses.push(topicResponse);
         }
+    } else {
+        // No specific topics requested - return all available topics
+        console.error(`[your_program] DEBUG: No topics in request, returning all available topics`);
         
-        const topicResponse = Buffer.concat([
-            topicIdBuffer, // Use the original topic ID from request
-            writeVarInt(partitionResponses.length + 1),
-            ...partitionResponses,
-            responseTagBuffer
-        ]);
-        topicResponses.push(topicResponse);
+        // Create responses for all available topics
+        for (const [topicIdHex, topicName] of topicIdToNameMap.entries()) {
+            console.error(`[your_program] DEBUG: Creating response for topic ${topicIdHex} -> ${topicName}`);
+            
+            // Convert hex string back to buffer
+            const topicIdBuffer = Buffer.from(topicIdHex, 'hex');
+            
+            // Find partitions for this topic
+            const partitionResponses = [];
+            try {
+                const entries = fs.readdirSync("/tmp/kraft-combined-logs", { withFileTypes: true });
+                
+                for (const entry of entries) {
+                    if (entry.isDirectory() && entry.name.startsWith(topicName + '-')) {
+                        const partitionIndex = parseInt(entry.name.split('-')[1]);
+                        if (!isNaN(partitionIndex)) {
+                            console.error(`[your_program] DEBUG: Found partition ${partitionIndex} for topic ${topicName}`);
+                            
+                            const partitionResponseBuffer = Buffer.alloc(4);
+                            partitionResponseBuffer.writeInt32BE(partitionIndex);
+                            
+                            const partitionResponse = Buffer.concat([
+                                partitionResponseBuffer,
+                                errorCode,
+                                Buffer.alloc(8).fill(0), // high_watermark
+                                Buffer.alloc(8).fill(0), // last_stable_offset
+                                Buffer.alloc(8).fill(0), // log_start_offset
+                                writeVarInt(1), // aborted_transactions (empty array)
+                                Buffer.alloc(4).fill(0), // preferred_read_replica
+                                writeCompactBytes(Buffer.alloc(0)), // empty records
+                                responseTagBuffer
+                            ]);
+                            partitionResponses.push(partitionResponse);
+                        }
+                    }
+                }
+            } catch (error) {
+                console.error(`[your_program] ERROR: Failed to read partitions for topic ${topicName}: ${error}`);
+            }
+            
+            if (partitionResponses.length > 0) {
+                const topicResponse = Buffer.concat([
+                    topicIdBuffer,
+                    writeVarInt(partitionResponses.length + 1),
+                    ...partitionResponses,
+                    responseTagBuffer
+                ]);
+                topicResponses.push(topicResponse);
+            }
+        }
     }
 
     // Build response
