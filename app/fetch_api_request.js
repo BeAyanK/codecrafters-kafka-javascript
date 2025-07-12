@@ -232,7 +232,7 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
             
             const topicResponse = Buffer.concat([
                 topicIdBuffer, // Use the original topic ID from request
-                writeVarInt(partitionResponses.length + 1),
+                writeVarInt(partitionResponses.length + 2),
                 ...partitionResponses,
                 responseTagBuffer, // Topic tag buffer (0x00)
             ]);
