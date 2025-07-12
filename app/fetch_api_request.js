@@ -47,11 +47,6 @@ function loadTopicMetadata(logDir) {
     console.error(`[your_program] DEBUG: Found ${entries.length} entries in ${logDir}`);
 
     for (const entry of entries) {
-      // Filter for directories that likely contain topic-partition data
-      // e.g., "foo-0", "paz-1". Exclude internal Kafka dirs like "__cluster_metadata-0".
-      // A more robust check for topic-partition directories: must not start with '__'
-      // and must contain a hyphen for topic-name-partition-id format.
-      // We are *not* extracting topicName from 'entry.name' here, but from 'partition.metadata'
       if (entry.isDirectory() && !entry.name.startsWith('__') && entry.name.includes('-')) {
         const partitionMetadataPath = path.join(logDir, entry.name, "partition.metadata");
         
@@ -60,22 +55,27 @@ function loadTopicMetadata(logDir) {
           let topicIdFromMetadata = null;
           let topicNameFromMetadata = null;
 
-          // Parse content line by line
-          content.split(/\r?\n/).forEach(line => { // Use regex for robust newline splitting
-            const trimmedLine = line.trim(); // Trim whitespace from lines
-            // FIX: Corrected "topic_id=" to "topic.id="
-            if (trimmedLine.startsWith("topic.id=")) {
-              const uuidString = trimmedLine.substring("topic.id=".length);
-              const rawUuidHex = uuidString.replace(/-/g, '').toLowerCase(); // Ensure lowercase for consistent hex string comparison
-              if (rawUuidHex.length === 32) { // UUID is 16 bytes = 32 hex characters
-                  topicIdFromMetadata = rawUuidHex;
-              }
-            } else if (trimmedLine.startsWith("topic.name=")) { // This was already correct
-              topicNameFromMetadata = trimmedLine.substring("topic.name=".length);
+          content.split(/\r?\n/).forEach(line => {
+            const trimmedLine = line.trim();
+            const parts = trimmedLine.split('=');
+            
+            // Robust parsing for key=value lines
+            if (parts.length === 2) {
+                const key = parts[0].trim();
+                const value = parts[1].trim();
+
+                if (key === "topic.id") {
+                    const uuidString = value;
+                    const rawUuidHex = uuidString.replace(/-/g, '').toLowerCase();
+                    if (rawUuidHex.length === 32) {
+                        topicIdFromMetadata = rawUuidHex;
+                    }
+                } else if (key === "topic.name") {
+                    topicNameFromMetadata = value;
+                }
             }
           });
 
-          // Only map if both ID and Name were found in the file
           if (topicIdFromMetadata && topicNameFromMetadata) {
             topicIdToNameMap.set(topicIdFromMetadata, topicNameFromMetadata);
             console.error(`[your_program] DEBUG: Loaded topic mapping: ${topicIdFromMetadata} -> ${topicNameFromMetadata}`);
@@ -86,7 +86,6 @@ function loadTopicMetadata(logDir) {
     
     metadataLoaded = true; // Set flag that metadata has been loaded (even if empty)
 
-    // Log the outcome for debugging on CodeCrafters platform
     if (topicIdToNameMap.size > 0) {
       console.error(`[your_program] Final loaded topic metadata: ${JSON.stringify(Array.from(topicIdToNameMap.entries()))}`);
     } else {
@@ -94,7 +93,6 @@ function loadTopicMetadata(logDir) {
     }
   } catch (error) {
     console.error(`[your_program] ERROR: Failed to load topic metadata from ${logDir}: ${error.message}`);
-    // Ensure metadataLoaded is true even on error to prevent repeated attempts
     metadataLoaded = true; 
   }
 }
@@ -103,38 +101,42 @@ function loadTopicMetadata(logDir) {
 export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
     console.error(`[your_program] DEBUG: handleFetchApiRequest called`);
     
-    // Ensure metadata is loaded exactly once at the beginning of the first request handling
     if (!metadataLoaded) {
         loadTopicMetadata("/tmp/kraft-combined-logs");
     }
 
-    // Constants for response fields
     const throttleTime = Buffer.alloc(4).fill(0);
     const errorCode = Buffer.alloc(2).fill(0);
     const sessionId = Buffer.alloc(4).fill(0);
-    const responseTagBuffer = Buffer.from([0]); // Empty tag buffer for response body
+    const responseTagBuffer = Buffer.from([0]);
 
-    // Parse request - Fetch API v16
+    // Request parsing:
     // Message Size (4) + API Key (2) + API Version (2) + Correlation ID (4) = 12 bytes
     let offset = 12; 
     
+    // DEBUG: Log initial bytes to diagnose offset issues
+    console.error(`[your_program] DEBUG: Buffer at offset ${offset}: ${buffer.subarray(offset, offset + 10).toString('hex')}`); // Peek next 10 bytes
+
+    // The byte at 'offset' (which is 12) should be the RequestHeader TAG_BUFFER (0x00 for no tags)
+    const headerTagBuffer = buffer.readUInt8(offset++); 
+    console.error(`[your_program] DEBUG: Read Header TAG_BUFFER: ${headerTagBuffer}, New offset: ${offset}`);
+
     // Read Client ID (compact string: VarInt length + bytes).
     // The VarInt value itself determines length: 0 means null, >0 means (length + 1).
     let clientIdLengthVarIntInfo = readVarInt(buffer, offset);
     offset = clientIdLengthVarIntInfo.offset;
-    const clientIdStringLength = clientIdLengthVarIntInfo.value === 0 ? -1 : clientIdLengthVarIntInfo.value - 1; // -1 for null, 0 for empty string, etc.
+    const clientIdStringLength = clientIdLengthVarIntInfo.value === 0 ? -1 : clientIdLengthVarIntInfo.value - 1; 
     
     console.error(`[your_program] DEBUG: Client ID VarInt value: ${clientIdLengthVarIntInfo.value}, Decoded length: ${clientIdStringLength}, Current offset: ${offset}`);
     
-    if (clientIdStringLength >= 0) { // If it's not a null string (-1 decoded length)
+    if (clientIdStringLength >= 0) { 
+        console.error(`[your_program] DEBUG: Reading Client ID string: ${buffer.subarray(offset, offset + clientIdStringLength).toString('utf8')}`);
         offset += clientIdStringLength; // Advance past the actual string bytes
+    } else {
+        console.error(`[your_program] DEBUG: Client ID is NULL.`);
     }
-    
-    // Read RequestHeader TAG_BUFFER (flexible versions have a tag buffer in the header). Should be 0 for this stage.
-    const headerTagBuffer = buffer.readUInt8(offset++); 
-    console.error(`[your_program] DEBUG: Header TAG_BUFFER: ${headerTagBuffer}, New offset: ${offset}`);
-    
-    // Read request body fields
+
+    // After Client ID, should be the fixed-size fields of Fetch Request
     const replicaId = buffer.readInt32BE(offset); offset += 4;
     const maxWaitMs = buffer.readInt32BE(offset); offset += 4;
     const minBytes = buffer.readInt32BE(offset); offset += 4;
@@ -144,31 +146,29 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
     const sessionEpoch = buffer.readInt32BE(offset); offset += 4;
     
     console.error(`[your_program] DEBUG: After fixed request body fields, offset: ${offset}`);
-    console.error(`[your_program] DEBUG: replicaId: ${replicaId}, maxWaitMs: ${maxWaitMs}, minBytes: ${minBytes}, maxBytes: ${maxBytes}, isolationLevel: ${isolationLevel}`);
+    console.error(`[your_program] DEBUG: replicaId: ${replicaId}, maxWaitMs: ${maxWaitMs}, minBytes: ${minBytes}, maxBytes: ${maxBytes}, isolationLevel: ${isolationLevel}, sessionId: ${sessionIdFromReq}, sessionEpoch: ${sessionEpoch}`);
     
     // Read topics array (COMPACT_ARRAY of FetchTopic)
     let topicArrayInfo = readVarInt(buffer, offset);
     offset = topicArrayInfo.offset;
-    const numTopicsInRequest = topicArrayInfo.value > 0 ? topicArrayInfo.value - 1 : 0; // Value 0 means null (no topics), 1 means 0 topics, etc.
+    const numTopicsInRequest = topicArrayInfo.value > 0 ? topicArrayInfo.value - 1 : 0; 
 
     console.error(`[your_program] DEBUG: VarInt value for topics array: ${topicArrayInfo.value}, Decoded number of topics in request: ${numTopicsInRequest}, Current offset: ${offset}`);
     
     const topicResponses = [];
 
-    // Process topics from request
     if (numTopicsInRequest > 0) {
         for (let i = 0; i < numTopicsInRequest; i++) {
             const topicIdBuffer = buffer.subarray(offset, offset + 16);
-            offset += 16; // Advance past topic_id (UUID)
-            offset += 1; // Skip tag buffer for topic in request (COMPACT_ARRAY of TaggedFields)
+            offset += 16; 
+            offset += 1; // Skip tag buffer for topic in request (always 0x00 for no tags)
 
-            // Lookup topic name using the pre-loaded map. Convert UUID buffer to lowercase hex string.
             const topicIdHex = topicIdBuffer.toString('hex').toLowerCase();
             const topicName = topicIdToNameMap.get(topicIdHex);
             
             if (!topicName) {
                 console.error(`[your_program] WARN: Could not find topic name for ID: ${topicIdHex}. Skipping this topic in response.`);
-                continue; // Skip processing this topic if name not found
+                continue; 
             }
 
             console.error(`[your_program] DEBUG: Processing requested topic ${topicIdHex} -> ${topicName}`);
@@ -183,12 +183,11 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
             const partitionResponses = [];
             for (let j = 0; j < numPartitionsInRequest; j++) {
                 const partitionIndex = buffer.readInt32BE(offset); offset += 4;
-                // These are request fields. You should extract them but not use them directly as response values.
                 offset += 4; // current_leader_epoch (INT32)
                 offset += 8; // fetch_offset (INT64)
                 offset += 8; // log_start_offset (INT64)
                 offset += 4; // partition_max_bytes (INT32)
-                offset += 1; // partition tag buffer in request (COMPACT_ARRAY of TaggedFields)
+                offset += 1; // partition tag buffer in request (always 0x00)
 
                 console.error(`[your_program] DEBUG: Processing partition ${partitionIndex} for topic ${topicName}`);
                 
@@ -202,11 +201,11 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
                         console.error(`[your_program] DEBUG: Read ${fileContent.length} bytes from ${logFilePath}`);
                     } else {
                         console.error(`[your_program] WARNING: Log file not found at ${logFilePath}. Sending empty record batch.`);
-                        recordBatchBuffer = writeCompactBytes(Buffer.alloc(0)); // Empty record batch
+                        recordBatchBuffer = writeCompactBytes(Buffer.alloc(0)); 
                     }
                 } catch (error) {
                     console.error(`[your_program] ERROR: Reading log file for partition ${topicName}-${partitionIndex}: ${error.message}. Sending empty record batch.`);
-                    recordBatchBuffer = writeCompactBytes(Buffer.alloc(0)); // On error, send empty record batch
+                    recordBatchBuffer = writeCompactBytes(Buffer.alloc(0)); 
                 }
                 
                 const partitionIndexBuffer = Buffer.alloc(4);
@@ -214,59 +213,46 @@ export const handleFetchApiRequest = (connection, responseMessage, buffer) => {
 
                 const partitionResponse = Buffer.concat([
                     partitionIndexBuffer,
-                    errorCode, // error_code (INT16, 0 for NO_ERROR)
-                    Buffer.alloc(8).fill(0), // high_watermark (INT64) - Placeholder value (0)
-                    Buffer.alloc(8).fill(0), // last_stable_offset (INT64) - Placeholder value (0)
-                    Buffer.alloc(8).fill(0), // log_start_offset (INT64) - Placeholder value (0)
-                    writeVarInt(1),          // aborted_transactions (COMPACT_ARRAY, 0 elements means VarInt 1) - Empty array
-                    Buffer.alloc(4).fill(0), // preferred_read_replica (INT32) - Placeholder value (0)
+                    errorCode,
+                    Buffer.alloc(8).fill(0), // high_watermark
+                    Buffer.alloc(8).fill(0), // last_stable_offset
+                    Buffer.alloc(8).fill(0), // log_start_offset
+                    writeVarInt(1),          // aborted_transactions (empty array means VarInt 1)
+                    Buffer.alloc(4).fill(0), // preferred_read_replica
                     recordBatchBuffer,       // records (COMPACT_BYTES)
-                    responseTagBuffer,       // partition tag buffer (COMPACT_ARRAY of TaggedFields)
+                    responseTagBuffer,       // partition tag buffer (0x00)
                 ]);
                 partitionResponses.push(partitionResponse);
             }
             
             const topicResponse = Buffer.concat([
                 topicIdBuffer, // Use the original topic ID from request
-                writeVarInt(partitionResponses.length + 1), // num_partitions (COMPACT_ARRAY length)
+                writeVarInt(partitionResponses.length + 1),
                 ...partitionResponses,
-                responseTagBuffer, // Topic tag buffer
+                responseTagBuffer, // Topic tag buffer (0x00)
             ]);
             topicResponses.push(topicResponse);
         }
     } else {
-        // This block should ideally not be hit for this stage's test case,
-        // as the test explicitly requests topics.
-        // If it is hit, it means there's an issue with parsing the request topics.
-        console.error(`[your_program] DEBUG: No topics explicitly requested. Returning an empty topic list as per typical Kafka behavior.`);
-        // Kafka generally returns an empty topics array if none are explicitly requested,
-        // unless it's a very specific all-topics fetch which is not standard.
-        // For this stage, an empty response will lead to failure.
-        // So, if you reach here, the request parsing is the problem.
+        console.error(`[your_program] DEBUG: Request specified 0 topics. This might indicate an issue with request parsing.`);
     }
 
-    // Build response body:
-    // throttle_time_ms (INT32)
-    // error_code (INT16)
-    // session_id (INT32)
-    // responses (COMPACT_ARRAY of FetchableTopicResponse)
-    // tag_buffer (COMPACT_ARRAY of TaggedFields)
     const responseBody = Buffer.concat([
         throttleTime,
         errorCode,
         sessionId,
-        writeVarInt(topicResponses.length + 1), // num_responses (COMPACT_ARRAY length for topics)
+        writeVarInt(topicResponses.length + 1),
         ...topicResponses,
-        responseTagBuffer, // Response body tag buffer
+        responseTagBuffer, 
     ]);
 
     const correlationIdBuffer = Buffer.alloc(4);
     correlationIdBuffer.writeInt32BE(responseMessage.correlationId);
-    const responseHeaderTagBuffer = Buffer.from([0]); // Empty tag buffer for response header
+    const responseHeaderTagBuffer = Buffer.from([0]); 
 
     const fullResponseData = Buffer.concat([
         correlationIdBuffer,
-        responseHeaderTagBuffer, // Header Tag Buffer
+        responseHeaderTagBuffer, 
         responseBody,
     ]);
 
